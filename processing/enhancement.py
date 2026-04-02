@@ -162,3 +162,109 @@ def brightness_contrast(img: np.ndarray,
     """
     result = cv2.convertScaleAbs(img, alpha=contrast, beta=brightness)
     return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8. Combined Enhancement for Blurry Images
+# ──────────────────────────────────────────────────────────────────────────────
+
+def enhance_blurry_image(img: np.ndarray,
+                         clahe_clip: float = 3.0,
+                         clahe_tiles: tuple = (8, 8),
+                         sharpen_strength: float = 2.0) -> np.ndarray:
+    """
+    Combined enhancement for motion-blurred or soft images.
+    
+    Steps:
+    1. Apply CLAHE for contrast enhancement
+    2. Apply unsharp masking for sharpening
+    
+    Args:
+        img: Input image (BGR or grayscale)
+        clahe_clip: Clip limit for CLAHE (higher = stronger)
+        clahe_tiles: Tile grid size for CLAHE
+        sharpen_strength: Unsharp masking strength (k parameter)
+    
+    Returns:
+        Enhanced image with better clarity and sharpness
+    """
+    # Step 1: CLAHE for contrast enhancement
+    enhanced = clahe_enhancement(img, clip_limit=clahe_clip, tile_grid=clahe_tiles)
+    
+    # Step 2: Unsharp masking for sharpening
+    blurred = cv2.GaussianBlur(enhanced, (5, 5), 1.0)
+    enhanced_f = enhanced.astype(np.float32)
+    blurred_f = blurred.astype(np.float32)
+    mask = enhanced_f - blurred_f
+    result = enhanced_f + sharpen_strength * mask
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 9. Reduce Glare / Anti-Backlight Enhancement
+# ──────────────────────────────────────────────────────────────────────────────
+
+def reduce_glare_exposure(img: np.ndarray,
+                          gamma: float = 1.5,
+                          clahe_clip: float = 2.5,
+                          highlights_recover: float = 0.3) -> np.ndarray:
+    """
+    Reduce glare and overexposure for backlit images.
+    Suitable for images with excessive bright areas or highlights.
+    
+    Steps:
+    1. Apply gamma correction (gamma > 1) to darken bright areas
+    2. Apply CLAHE to recover shadow details
+    3. Blend with original to preserve natural look
+    
+    Args:
+        img: Input image (BGR or grayscale)
+        gamma: Gamma correction (1.5 = moderate darkening, 2.0+ = strong)
+        clahe_clip: CLAHE clip limit for detail recovery
+        highlights_recover: Blend factor [0-1] to control strength correction
+    
+    Returns:
+        Image with reduced glare and balanced exposure
+    """
+    # Step 1: Gamma correction to darken highlights
+    corrected = gamma_correction(img, gamma=gamma)
+    
+    # Step 2: Apply CLAHE to recover shadow details
+    enhanced = clahe_enhancement(corrected, clip_limit=clahe_clip, tile_grid=(8, 8))
+    
+    # Step 3: Blend with original to avoid over-darkening
+    img_f = img.astype(np.float32)
+    enhanced_f = enhanced.astype(np.float32)
+    result = img_f * (1 - highlights_recover) + enhanced_f * highlights_recover
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def anti_backlight_enhancement(img: np.ndarray,
+                                shadow_boost: float = 1.3,
+                                highlight_reduce: float = 0.7) -> np.ndarray:
+    """
+    Advanced anti-backlight enhancement using tone mapping.
+    Brightens shadows and tones down highlights for balanced exposure.
+    
+    Args:
+        img: Input image (BGR or grayscale)
+        shadow_boost: Multiplicative factor for shadow areas (higher = brighter shadows)
+        highlight_reduce: Multiplicative factor for highlights (lower = darker highlights)
+    
+    Returns:
+        Balanced image with improved backlight handling
+    """
+    img_float = img.astype(np.float32) / 255.0
+    
+    # Simple tone mapping: expand midtones, compress extremes
+    mid = 0.5
+    result = np.where(
+        img_float < mid,
+        img_float ** (1 / shadow_boost),  # Boost shadows
+        img_float ** highlight_reduce      # Reduce highlights
+    )
+    
+    return np.clip(result * 255, 0, 255).astype(np.uint8)
+

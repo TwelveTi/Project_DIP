@@ -12,7 +12,9 @@ from processing.enhancement import (
     histogram_equalization, clahe_enhancement,
     gamma_correction, contrast_stretching,
     log_transform, power_law_transform,
-    negative_transform, brightness_contrast
+    negative_transform, brightness_contrast,
+    enhance_blurry_image, reduce_glare_exposure,
+    anti_backlight_enhancement
 )
 from processing.filters import (
     mean_filter, gaussian_filter, median_filter,
@@ -70,7 +72,7 @@ class DIPTool(ctk.CTk):
                       fg_color="#663300", hover_color="#552200").pack(fill="x", padx=12, pady=(3, 10))
 
         # ── Enhancement ───────────────────────────
-        self._section("✨ Quality Adjustment")
+        self._section("Quality Adjustment")
 
         # Auto contrast
         ctk.CTkButton(self.sidebar, text="Auto Contrast",
@@ -86,7 +88,7 @@ class DIPTool(ctk.CTk):
                      font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 8))
 
         # Brightness Correction
-        ctk.CTkLabel(self.sidebar, text="💡 Brightness Correction", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=14, pady=(8, 0))
+        ctk.CTkLabel(self.sidebar, text="Brightness Correction", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=14, pady=(8, 0))
         self.gamma_slider = ctk.CTkSlider(self.sidebar, from_=0.1, to=5.0, number_of_steps=49,
                                            command=self._on_gamma_change)
         self.gamma_slider.set(1.0)
@@ -108,10 +110,28 @@ class DIPTool(ctk.CTk):
                       command=self.apply_negative,
                       fg_color="#5f1e3f", hover_color="#7f2a5f").pack(fill="x", padx=12, pady=2)
         ctk.CTkLabel(self.sidebar, text="Create negative image",
+                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
+
+        ctk.CTkButton(self.sidebar, text="🔍 Enhance Blurry Image",
+                      command=self.apply_enhance_blurry,
+                      fg_color="#3f5f1e", hover_color="#5f7f2a").pack(fill="x", padx=12, pady=2)
+        ctk.CTkLabel(self.sidebar, text="Sharpen & clarify motion blur",
+                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
+
+        ctk.CTkButton(self.sidebar, text="☀️ Reduce Glare",
+                      command=self.apply_reduce_glare,
+                      fg_color="#5f5f1e", hover_color="#7f7f2a").pack(fill="x", padx=12, pady=2)
+        ctk.CTkLabel(self.sidebar, text="Fix overexposed bright areas",
+                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
+
+        ctk.CTkButton(self.sidebar, text="🌅 Anti-Backlight",
+                      command=self.apply_anti_backlight,
+                      fg_color="#5f3f1e", hover_color="#7f5f2a").pack(fill="x", padx=12, pady=2)
+        ctk.CTkLabel(self.sidebar, text="Balance shadows & highlights",
                      font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 8))
 
         # Brightness & Contrast sliders
-        ctk.CTkLabel(self.sidebar, text="🎚️ Fine-tune", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=14, pady=(8, 0))
+        ctk.CTkLabel(self.sidebar, text="Fine-tune", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=14, pady=(8, 0))
         self.bright_slider = ctk.CTkSlider(self.sidebar, from_=-100, to=100, number_of_steps=200,
                                             command=self._on_brightness_change)
         self.bright_slider.set(0)
@@ -122,10 +142,10 @@ class DIPTool(ctk.CTk):
         self.contrast_slider.set(1.0)
         self.contrast_slider.pack(fill="x", padx=12, pady=2)
         ctk.CTkLabel(self.sidebar, text="Contrast", font=ctk.CTkFont(size=10)).pack(anchor="w", padx=14)
-        ctk.CTkLabel(self.sidebar, text="📍 Real-time preview", font=ctk.CTkFont(size=9, weight="bold"), text_color="#00d4ff").pack(anchor="w", padx=14, pady=(0, 8))
+        ctk.CTkLabel(self.sidebar, text="Real-time preview", font=ctk.CTkFont(size=9, weight="bold"), text_color="#00d4ff").pack(anchor="w", padx=14, pady=(0, 8))
 
         # ── Noise ─────────────────────────────────
-        self._section("🌫️ Test with Noise")
+        self._section("Test with Noise")
         ctk.CTkLabel(self.sidebar, text="(for testing filters)",
                      font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
         ctk.CTkLabel(self.sidebar, text="Intensity", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14)
@@ -140,7 +160,7 @@ class DIPTool(ctk.CTk):
                       command=self.add_speckle).pack(fill="x", padx=12, pady=(2, 8))
 
         # ── Smoothing Filters ─────────────────────
-        self._section("🌊 Smooth & Denoise")
+        self._section("Smooth & Denoise")
         ctk.CTkLabel(self.sidebar, text="Filter Size", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14, pady=(4, 0))
         self.kernel_var = ctk.StringVar(value="3")
         ks_row = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -168,30 +188,40 @@ class DIPTool(ctk.CTk):
                      font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 8))
 
         # ── Sharpening ────────────────────────────
-        self._section("🔪 Sharpen & Enhance Details")
+        self._section("Sharpen & Enhance Details")
         
         ctk.CTkButton(self.sidebar, text="Sharpen",
                       command=self.apply_laplacian_sharp,
                       fg_color="#5f4f1e", hover_color="#7f6f2a").pack(fill="x", padx=12, pady=2)
         ctk.CTkLabel(self.sidebar, text="Bring out edges",
+                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 2))
+
+        ctk.CTkButton(self.sidebar, text="Unsharp Masking",
+                      command=self.apply_unsharp,
+                      fg_color="#5f4f1e", hover_color="#7f6f2a").pack(fill="x", padx=12, pady=2)
+        ctk.CTkLabel(self.sidebar, text="Smart sharpening with slider",
                      font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
 
-        ctk.CTkLabel(self.sidebar, text="🎚️ Smart Sharpen", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14, pady=(6, 0))
+        ctk.CTkLabel(self.sidebar, text="Smart Sharpen", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14, pady=(6, 0))
         self.unsharp_k = ctk.CTkSlider(self.sidebar, from_=0.5, to=3.0, number_of_steps=25,
-                                       command=self._on_unsharp_change)
+                                       command=lambda v: self.apply_unsharp())
         self.unsharp_k.set(1.5)
         self.unsharp_k.pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="📍 Real-time preview", font=ctk.CTkFont(size=9, weight="bold"), text_color="#00d4ff").pack(anchor="w", padx=14, pady=(0, 6))
+        self.unsharp_label = ctk.CTkLabel(self.sidebar, text="Strength: 1.5", font=ctk.CTkFont(size=9))
+        self.unsharp_label.pack(anchor="w", padx=14, pady=(2, 0))
+        ctk.CTkLabel(self.sidebar, text="Move slider for real-time preview", font=ctk.CTkFont(size=9, weight="bold"), text_color="#00d4ff").pack(anchor="w", padx=14, pady=(0, 6))
 
-        ctk.CTkLabel(self.sidebar, text="🎚️ Enhanced Sharpen", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14, pady=(6, 0))
+        ctk.CTkLabel(self.sidebar, text="Enhanced Sharpen", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14, pady=(6, 0))
         self.highboost_a = ctk.CTkSlider(self.sidebar, from_=1.0, to=5.0, number_of_steps=40,
-                                         command=self._on_highboost_change)
+                                         command=lambda v: self.apply_highboost())
         self.highboost_a.set(2.0)
         self.highboost_a.pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="📍 Real-time preview", font=ctk.CTkFont(size=9, weight="bold"), text_color="#00d4ff").pack(anchor="w", padx=14, pady=(0, 8))
+        self.highboost_label = ctk.CTkLabel(self.sidebar, text="Intensity: 2.0", font=ctk.CTkFont(size=9))
+        self.highboost_label.pack(anchor="w", padx=14, pady=(2, 0))
+        ctk.CTkLabel(self.sidebar, text="Move slider for real-time preview", font=ctk.CTkFont(size=9, weight="bold"), text_color="#00d4ff").pack(anchor="w", padx=14, pady=(0, 8))
 
         # ── Edge Detection ────────────────────────
-        self._section("📐 Detect Edges")
+        self._section("Detect Edges")
         ctk.CTkButton(self.sidebar, text="Auto Detect (Best)",
                       command=self.apply_canny,
                       fg_color="#5f1f4f", hover_color="#7f2f6f").pack(fill="x", padx=12, pady=2)
@@ -211,7 +241,7 @@ class DIPTool(ctk.CTk):
                       fg_color="#5f1f4f", hover_color="#7f2f6f").pack(fill="x", padx=12, pady=(2, 8))
 
         # ── Custom Kernel ─────────────────────────
-        self._section("⚙️ Advanced (Custom Kernel)")
+        self._section("Advanced (Custom Kernel)")
         ctk.CTkLabel(self.sidebar, text="Built your own 3×3 filter",
                      font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
         self.kernel_entries = []
@@ -420,8 +450,8 @@ class DIPTool(ctk.CTk):
         if not self._check():
             return
         try:
-            # Always apply effect on original_image (reset each time)
-            result = fn(self.original_image, *args, **kwargs)
+            # Apply effect on current_image to preserve previous changes
+            result = fn(self.current_image, *args, **kwargs)
             self.current_image = result
             self.refresh_display()
         except Exception as e:
@@ -452,6 +482,17 @@ class DIPTool(ctk.CTk):
         b = int(self.bright_slider.get())
         c = self.contrast_slider.get()
         self._apply(brightness_contrast, brightness=b, contrast=c)
+
+    def apply_enhance_blurry(self):
+        clahe_clip = 3.0
+        sharpen_strength = 2.0
+        self._apply(enhance_blurry_image, clahe_clip=clahe_clip, sharpen_strength=sharpen_strength)
+
+    def apply_reduce_glare(self):
+        self._apply(reduce_glare_exposure, gamma=1.5, clahe_clip=2.5, highlights_recover=0.4)
+
+    def apply_anti_backlight(self):
+        self._apply(anti_backlight_enhancement, shadow_boost=1.3, highlight_reduce=0.7)
 
     # ──────────────────────────────────────────────
     # NOISE
@@ -487,10 +528,12 @@ class DIPTool(ctk.CTk):
 
     def apply_unsharp(self):
         k = self.unsharp_k.get()
+        self.unsharp_label.configure(text=f"Strength: {k:.2f}")
         self._apply(unsharp_masking, k=k)
 
     def apply_highboost(self):
         a = self.highboost_a.get()
+        self.highboost_label.configure(text=f"Intensity: {a:.2f}")
         self._apply(high_boost_filter, A=a)
 
     def apply_custom_kernel(self):

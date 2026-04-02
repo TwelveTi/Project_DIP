@@ -1,11 +1,11 @@
-# 📸 Image Editor — DIP Tool
+# Image Editor — DIP Tool
 
 > Digital Image Processing Tool | Enhance & Filter Photos  
 > Academic Project | Digital Image Processing Course
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Install
 
@@ -21,11 +21,11 @@ python main.py
 
 ---
 
-## 📖 How to Use
+## How to Use
 
 ### 1. **Load an Image**
 
-- Click `📂 Open Image`
+- Click `Open Image`
 - Select any image from your computer (PNG, JPG, BMP, TIFF, WebP)
 - Image appears in the left panel
 
@@ -33,7 +33,7 @@ python main.py
 
 Pick from the left sidebar based on what you want to do:
 
-#### **✨ Quality Adjustment** — Make image look better
+#### **Quality Adjustment** — Make image look better
 
 - **Auto Contrast** → Automatically improve brightness & contrast
 - **Smart Contrast** → Better version (preserves local details)
@@ -43,7 +43,7 @@ Pick from the left sidebar based on what you want to do:
 - **Invert Colors** → Create a negative/inverse image
 - **Fine-tune** → Manual brightness & contrast sliders
 
-#### **🌊 Smooth & Denoise** — Remove noise & blur
+#### **Smooth & Denoise** — Remove noise & blur
 
 Choose filter size (3, 5, 7, or 9):
 
@@ -51,26 +51,26 @@ Choose filter size (3, 5, 7, or 9):
 - **Gentle Smooth** → Natural blur (better quality)
 - **Remove Spots** → Best for noisy photos (removes speckles)
 
-#### **🔪 Sharpen & Enhance Details** — Make image crisper
+#### **Sharpen & Enhance Details** — Make image crisper
 
 - **Sharpen** → Quick edge enhancement
 - **Smart Sharpen** → Control sharpening strength (slider)
 - **Enhanced Sharpen** → Strong sharpening (slider)
 
-#### **📐 Detect Edges** — Find boundaries & contours
+#### **Detect Edges** — Find boundaries & contours
 
 - **Auto Detect (Best)** → Smart edge detection
 - **Sobel Edges** → Horizontal & vertical edges
 - **Prewitt Edges** → Similar to Sobel
 - **Laplacian Edges** → All-direction edges
 
-#### **🌫️ Test with Noise** — Add noise (for testing filters)
+#### **Test with Noise** — Add noise (for testing filters)
 
 - **Add Spots** → Random white/black dots
 - **Add Blur Noise** → Gaussian noise
 - **Add Texture Noise** → Speckle/film grain
 
-#### **⚙️ Advanced** — Build custom filters
+#### **Advanced** — Build custom filters
 
 - Enter numbers in the 3×3 matrix
 - Click `Apply Custom Kernel`
@@ -83,36 +83,36 @@ Choose filter size (3, 5, 7, or 9):
 
 ### 4. **Save Your Work**
 
-- Click `💾 Save Result`
+- Click `Save Result`
 - Choose filename & format (PNG or JPG)
 
 ---
 
-## 🎯 Demo Workflow
+## Demo Workflow
 
 **Scenario 1: Noisy Photo → Clean Image**
 
 1. Open image
-2. Go to 🌫️ → Add a bit of noise (test)
-3. Go to 🌊 → Apply "Remove Spots" with size 5-7
+2. Go to Test with Noise → Add a bit of noise (test)
+3. Go to Smooth & Denoise → Apply "Remove Spots" with size 5-7
 4. View result in Split mode
 
 **Scenario 2: Dark Photo → Bright & Clear**
 
 1. Open dark photo
-2. Go to ✨ → Click "Auto Contrast"
+2. Go to Quality Adjustment → Click "Auto Contrast"
 3. If still dark: Use "Brightness Correction" slider
-4. Go to 🔪 → Apply "Smart Sharpen" (optional)
+4. Go to Sharpen & Enhance Details → Apply "Smart Sharpen" (optional)
 
 **Scenario 3: Find Edges**
 
 1. Open photo
-2. Go to 📐 → Click "Auto Detect (Best)"
+2. Go to Detect Edges → Click "Auto Detect (Best)"
 3. Try other edge detectors to compare
 
 ---
 
-## ✨ Features & Algorithms
+## Features & Algorithms
 
 ### Quality Adjustment (Enhancement)
 
@@ -169,7 +169,7 @@ Find areas where pixel intensity changes rapidly (edges) using gradient operator
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 dip_tool/
@@ -185,7 +185,7 @@ dip_tool/
 
 ---
 
-## 🛠️ Technical Details
+## Technical Details
 
 ### Library Stack
 
@@ -226,20 +226,20 @@ Each smoothing/sharpening filter uses **2D convolution**:
 
 ---
 
-## 🎓 Learning Outcomes
+## Learning Outcomes
 
 This project demonstrates:
 
-- ✅ **Spatial domain image processing** techniques
-- ✅ **Pixel-level** transformations (enhancement)
-- ✅ **Neighborhood operations** (filtering via convolution)
-- ✅ **Edge detection** algorithms
-- ✅ **GUI programming** in Python
-- ✅ **Real-time image processing** visualization
+- Spatial domain image processing techniques
+- Pixel-level transformations (enhancement)
+- Neighborhood operations (filtering via convolution)
+- Edge detection algorithms
+- GUI programming in Python
+- Real-time image processing visualization
 
 ---
 
-## 📊 Demo Images
+## Demo Images
 
 Recommended to test with:
 
@@ -250,7 +250,7 @@ Recommended to test with:
 
 ---
 
-## 💡 Tips
+## Tips
 
 1. **Use Split view** for A/B comparison
 2. **Start with small filter sizes (3-5)** → larger = more effect
@@ -260,7 +260,7 @@ Recommended to test with:
 
 ---
 
-## 📝 References
+## References
 
 Based on **Digital Image Processing** principles (Gonzalez & Woods):
 
@@ -270,7 +270,7 @@ Based on **Digital Image Processing** principles (Gonzalez & Woods):
 
 ---
 
-## 📄 License
+## License
 
 Academic Project | Educational Use Only
 
