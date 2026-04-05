@@ -6,6 +6,7 @@ from PIL import Image, ImageTk
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib
+import time
 matplotlib.use("TkAgg")
 
 from processing.enhancement import (
@@ -26,6 +27,10 @@ from processing.noise import (
     add_salt_pepper_noise, add_gaussian_noise,
     add_speckle_noise, add_periodic_noise
 )
+from processing.segmentation import (
+    remove_background_selfie, remove_background_simple,
+    apply_to_roi
+)
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -34,554 +39,1007 @@ ctk.set_default_color_theme("blue")
 class DIPTool(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("DIP Tool — Image Enhancement & Spatial Filtering")
-        self.geometry("1400x860")
-        self.minsize(1200, 720)
+        self.title("DIP Tool — Advanced Image Processing")
+        
+        # Get screen dimensions and maximize window
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        self.geometry(f"{screen_width}x{screen_height}+0+0")
+        self.state('zoomed')  # Maximize on Windows
+        self.minsize(1300, 750)
 
-        self.original_image = None   # numpy BGR
-        self.current_image = None    # numpy BGR (after processing)
-        self.display_mode = "split"  # split | original | processed
-
+        self.original_image = None
+        self.current_image = None
+        self.preview_image = None
+        self.roi_mask = None
+        self.drawing_roi = False
+        self.roi_start = None
+        self.roi_points = []
+        self.display_mode = "split"
+        
+        # Throttle refresh to avoid lag
+        self.last_refresh_time = 0
+        self.refresh_timer = None
+        
         self._build_ui()
 
-    # ──────────────────────────────────────────────
-    # UI LAYOUT
-    # ──────────────────────────────────────────────
     def _build_ui(self):
+        # Main layout: sidebar + main area
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # ── Left sidebar ──────────────────────────
-        self.sidebar = ctk.CTkScrollableFrame(self, width=300, corner_radius=0,
-                                               fg_color=("#1a1a2e", "#0f0f1a"))
+        # ─── LEFT SIDEBAR ───────────────────────────
+        self.sidebar = ctk.CTkScrollableFrame(
+            self, width=280, corner_radius=0,
+            fg_color=("#1a1a2e", "#0f0f1a")
+        )
         self.sidebar.grid(row=0, column=0, sticky="nsew")
+        self._build_sidebar()
 
-        ctk.CTkLabel(self.sidebar, text="� Image Editor",
-                     font=ctk.CTkFont(size=22, weight="bold"),
-                     text_color="#00d4ff").pack(pady=(18, 4))
-        ctk.CTkLabel(self.sidebar, text="Enhance & Filter Photos",
-                     font=ctk.CTkFont(size=11), text_color="#888").pack(pady=(0, 16))
-
-        # File buttons
-        self._section("📂 File")
-        ctk.CTkButton(self.sidebar, text="Open Image", command=self.open_image,
-                      fg_color="#0066cc", hover_color="#0055aa").pack(fill="x", padx=12, pady=3)
-        ctk.CTkButton(self.sidebar, text="Save Result", command=self.save_image,
-                      fg_color="#006633", hover_color="#005522").pack(fill="x", padx=12, pady=3)
-        ctk.CTkButton(self.sidebar, text="Reset to Original", command=self.reset_image,
-                      fg_color="#663300", hover_color="#552200").pack(fill="x", padx=12, pady=(3, 10))
-
-        # ── Enhancement ───────────────────────────
-        self._section("Quality Adjustment")
-
-        # Auto contrast
-        ctk.CTkButton(self.sidebar, text="Auto Contrast",
-                      command=self.apply_histeq,
-                      fg_color="#1e5f3f", hover_color="#2a7f5f").pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Automatically improve contrast",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 2))
-        
-        ctk.CTkButton(self.sidebar, text="Smart Contrast (CLAHE)",
-                      command=self.apply_clahe,
-                      fg_color="#1e5f3f", hover_color="#2a7f5f").pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Preserve local details",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 8))
-
-        # Brightness Correction
-        ctk.CTkLabel(self.sidebar, text="Brightness Correction", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=14, pady=(8, 0))
-        self.gamma_slider = ctk.CTkSlider(self.sidebar, from_=0.1, to=5.0, number_of_steps=49,
-                                           command=self._on_gamma_change)
-        self.gamma_slider.set(1.0)
-        self.gamma_slider.pack(fill="x", padx=12, pady=2)
-        self.gamma_label = ctk.CTkLabel(self.sidebar, text="← Darker  |  Normal  |  Brighter →", font=ctk.CTkFont(size=10))
-        self.gamma_label.pack(anchor="w", padx=14)
-        ctk.CTkButton(self.sidebar, text="Apply",
-                      command=self.apply_gamma,
-                      fg_color="#1e3f5f", hover_color="#2a5f7f").pack(fill="x", padx=12, pady=(2, 8))
-
-        # Other adjustments
-        ctk.CTkButton(self.sidebar, text="Brighten Dark Areas",
-                      command=self.apply_log,
-                      fg_color="#5f3f1e", hover_color="#7f5f2a").pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Bring out hidden details",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
-        
-        ctk.CTkButton(self.sidebar, text="Invert Colors",
-                      command=self.apply_negative,
-                      fg_color="#5f1e3f", hover_color="#7f2a5f").pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Create negative image",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
-
-        ctk.CTkButton(self.sidebar, text="🔍 Enhance Blurry Image",
-                      command=self.apply_enhance_blurry,
-                      fg_color="#3f5f1e", hover_color="#5f7f2a").pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Sharpen & clarify motion blur",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
-
-        ctk.CTkButton(self.sidebar, text="☀️ Reduce Glare",
-                      command=self.apply_reduce_glare,
-                      fg_color="#5f5f1e", hover_color="#7f7f2a").pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Fix overexposed bright areas",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
-
-        ctk.CTkButton(self.sidebar, text="🌅 Anti-Backlight",
-                      command=self.apply_anti_backlight,
-                      fg_color="#5f3f1e", hover_color="#7f5f2a").pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Balance shadows & highlights",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 8))
-
-        # Brightness & Contrast sliders
-        ctk.CTkLabel(self.sidebar, text="Fine-tune", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=14, pady=(8, 0))
-        self.bright_slider = ctk.CTkSlider(self.sidebar, from_=-100, to=100, number_of_steps=200,
-                                            command=self._on_brightness_change)
-        self.bright_slider.set(0)
-        self.bright_slider.pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Brightness", font=ctk.CTkFont(size=10)).pack(anchor="w", padx=14)
-        self.contrast_slider = ctk.CTkSlider(self.sidebar, from_=0.1, to=3.0, number_of_steps=59,
-                                             command=self._on_contrast_change)
-        self.contrast_slider.set(1.0)
-        self.contrast_slider.pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Contrast", font=ctk.CTkFont(size=10)).pack(anchor="w", padx=14)
-        ctk.CTkLabel(self.sidebar, text="Real-time preview", font=ctk.CTkFont(size=9, weight="bold"), text_color="#00d4ff").pack(anchor="w", padx=14, pady=(0, 8))
-
-        # ── Noise ─────────────────────────────────
-        self._section("Test with Noise")
-        ctk.CTkLabel(self.sidebar, text="(for testing filters)",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
-        ctk.CTkLabel(self.sidebar, text="Intensity", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14)
-        self.noise_amount = ctk.CTkSlider(self.sidebar, from_=0.01, to=0.2, number_of_steps=19)
-        self.noise_amount.set(0.05)
-        self.noise_amount.pack(fill="x", padx=12, pady=2)
-        ctk.CTkButton(self.sidebar, text="Add Spots (Salt & Pepper)",
-                      command=self.add_salt_pepper).pack(fill="x", padx=12, pady=2)
-        ctk.CTkButton(self.sidebar, text="Add Blur Noise (Gaussian)",
-                      command=self.add_gaussian).pack(fill="x", padx=12, pady=2)
-        ctk.CTkButton(self.sidebar, text="Add Texture Noise (Speckle)",
-                      command=self.add_speckle).pack(fill="x", padx=12, pady=(2, 8))
-
-        # ── Smoothing Filters ─────────────────────
-        self._section("Smooth & Denoise")
-        ctk.CTkLabel(self.sidebar, text="Filter Size", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14, pady=(4, 0))
-        self.kernel_var = ctk.StringVar(value="3")
-        ks_row = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        ks_row.pack(fill="x", padx=12, pady=2)
-        for k in ["3", "5", "7", "9"]:
-            ctk.CTkRadioButton(ks_row, text=k, variable=self.kernel_var, value=k,
-                               width=44).pack(side="left")
-
-        ctk.CTkButton(self.sidebar, text="Quick Smooth",
-                      command=self.apply_mean,
-                      fg_color="#1e5f3f", hover_color="#2a7f5f").pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Simple blur",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 2))
-        
-        ctk.CTkButton(self.sidebar, text="Gentle Smooth",
-                      command=self.apply_gaussian,
-                      fg_color="#1e5f3f", hover_color="#2a7f5f").pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Natural looking",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 2))
-        
-        ctk.CTkButton(self.sidebar, text="Remove Spots",
-                      command=self.apply_median,
-                      fg_color="#1e5f3f", hover_color="#2a7f5f").pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Best for noisy images",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 8))
-
-        # ── Sharpening ────────────────────────────
-        self._section("Sharpen & Enhance Details")
-        
-        ctk.CTkButton(self.sidebar, text="Sharpen",
-                      command=self.apply_laplacian_sharp,
-                      fg_color="#5f4f1e", hover_color="#7f6f2a").pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Bring out edges",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 2))
-
-        ctk.CTkButton(self.sidebar, text="Unsharp Masking",
-                      command=self.apply_unsharp,
-                      fg_color="#5f4f1e", hover_color="#7f6f2a").pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Smart sharpening with slider",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
-
-        ctk.CTkLabel(self.sidebar, text="Smart Sharpen", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14, pady=(6, 0))
-        self.unsharp_k = ctk.CTkSlider(self.sidebar, from_=0.5, to=3.0, number_of_steps=25,
-                                       command=lambda v: self.apply_unsharp())
-        self.unsharp_k.set(1.5)
-        self.unsharp_k.pack(fill="x", padx=12, pady=2)
-        self.unsharp_label = ctk.CTkLabel(self.sidebar, text="Strength: 1.5", font=ctk.CTkFont(size=9))
-        self.unsharp_label.pack(anchor="w", padx=14, pady=(2, 0))
-        ctk.CTkLabel(self.sidebar, text="Move slider for real-time preview", font=ctk.CTkFont(size=9, weight="bold"), text_color="#00d4ff").pack(anchor="w", padx=14, pady=(0, 6))
-
-        ctk.CTkLabel(self.sidebar, text="Enhanced Sharpen", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14, pady=(6, 0))
-        self.highboost_a = ctk.CTkSlider(self.sidebar, from_=1.0, to=5.0, number_of_steps=40,
-                                         command=lambda v: self.apply_highboost())
-        self.highboost_a.set(2.0)
-        self.highboost_a.pack(fill="x", padx=12, pady=2)
-        self.highboost_label = ctk.CTkLabel(self.sidebar, text="Intensity: 2.0", font=ctk.CTkFont(size=9))
-        self.highboost_label.pack(anchor="w", padx=14, pady=(2, 0))
-        ctk.CTkLabel(self.sidebar, text="Move slider for real-time preview", font=ctk.CTkFont(size=9, weight="bold"), text_color="#00d4ff").pack(anchor="w", padx=14, pady=(0, 8))
-
-        # ── Edge Detection ────────────────────────
-        self._section("Detect Edges")
-        ctk.CTkButton(self.sidebar, text="Auto Detect (Best)",
-                      command=self.apply_canny,
-                      fg_color="#5f1f4f", hover_color="#7f2f6f").pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(self.sidebar, text="Canny algorithm",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
-        
-        ctk.CTkButton(self.sidebar, text="Sobel Edges",
-                      command=self.apply_sobel,
-                      fg_color="#5f1f4f", hover_color="#7f2f6f").pack(fill="x", padx=12, pady=2)
-        
-        ctk.CTkButton(self.sidebar, text="Prewitt Edges",
-                      command=self.apply_prewitt,
-                      fg_color="#5f1f4f", hover_color="#7f2f6f").pack(fill="x", padx=12, pady=2)
-        
-        ctk.CTkButton(self.sidebar, text="Laplacian Edges",
-                      command=self.apply_laplacian_edge,
-                      fg_color="#5f1f4f", hover_color="#7f2f6f").pack(fill="x", padx=12, pady=(2, 8))
-
-        # ── Custom Kernel ─────────────────────────
-        self._section("Advanced (Custom Kernel)")
-        ctk.CTkLabel(self.sidebar, text="Built your own 3×3 filter",
-                     font=ctk.CTkFont(size=9), text_color="#777").pack(anchor="w", padx=14, pady=(0, 4))
-        self.kernel_entries = []
-        for r in range(3):
-            row_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-            row_frame.pack(padx=12, pady=1)
-            row_entries = []
-            for c in range(3):
-                default = "1" if r == 1 and c == 1 else "0"
-                e = ctk.CTkEntry(row_frame, width=52, justify="center")
-                e.insert(0, default)
-                e.pack(side="left", padx=2)
-                row_entries.append(e)
-            self.kernel_entries.append(row_entries)
-        ctk.CTkButton(self.sidebar, text="Apply Custom Kernel",
-                      command=self.apply_custom_kernel,
-                      fg_color="#4f4f1e", hover_color="#6f6f2a").pack(fill="x", padx=12, pady=(4, 8))
-
-        # ── Histogram view ────────────────────────
-        self._section("📊 Histogram")
-        ctk.CTkButton(self.sidebar, text="Show Histogram",
-                      command=self.show_histogram).pack(fill="x", padx=12, pady=2)
-
-        # ── Right main area ───────────────────────
+        # ─── RIGHT MAIN AREA ────────────────────────
         self.main_area = ctk.CTkFrame(self, fg_color=("#111122", "#08080f"))
         self.main_area.grid(row=0, column=1, sticky="nsew", padx=0, pady=0)
-        self.main_area.grid_rowconfigure(1, weight=1)
+        self.main_area.grid_rowconfigure(2, weight=1)
         self.main_area.grid_columnconfigure(0, weight=1)
-
-        # Top toolbar
-        toolbar = ctk.CTkFrame(self.main_area, height=48, fg_color=("#1a1a2e", "#0f0f1a"))
-        toolbar.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
-
-        ctk.CTkLabel(toolbar, text="View Mode:", font=ctk.CTkFont(size=12)).pack(side="left", padx=10)
-        for label, val in [("Split", "split"), ("Original", "original"), ("Processed", "processed")]:
-            ctk.CTkButton(toolbar, text=label, width=90,
-                          command=lambda v=val: self.set_view_mode(v),
-                          fg_color="#1e3a5f", hover_color="#2a5080").pack(side="left", padx=4, pady=6)
-
-        self.status_label = ctk.CTkLabel(toolbar, text="No image loaded",
-                                          font=ctk.CTkFont(size=11), text_color="#888")
-        self.status_label.pack(side="right", padx=14)
-
-        # Canvas area
-        self.canvas_frame = ctk.CTkFrame(self.main_area, fg_color="transparent")
-        self.canvas_frame.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
-        self.canvas_frame.grid_rowconfigure(1, weight=1)
-        self.canvas_frame.grid_columnconfigure(0, weight=1)
-        self.canvas_frame.grid_columnconfigure(1, weight=1)
-
-        self.label_orig = ctk.CTkLabel(self.canvas_frame, text="Original",
-                                        font=ctk.CTkFont(size=13, weight="bold"),
-                                        text_color="#aaa")
-        self.label_orig.grid(row=0, column=0, pady=(4, 0))
-        self.label_proc = ctk.CTkLabel(self.canvas_frame, text="Processed",
-                                        font=ctk.CTkFont(size=13, weight="bold"),
-                                        text_color="#00d4ff")
-        self.label_proc.grid(row=0, column=1, pady=(4, 0))
-
-        self.img_orig = ctk.CTkLabel(self.canvas_frame, text="Open an image to begin",
-                                      fg_color=("#0d0d1f", "#050510"), corner_radius=8)
-        self.img_orig.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
-        self.img_proc = ctk.CTkLabel(self.canvas_frame, text="",
-                                      fg_color=("#0d0d1f", "#050510"), corner_radius=8)
-        self.img_proc.grid(row=1, column=1, sticky="nsew", padx=2, pady=2)
+        self._build_main_area()
 
         self.bind("<Configure>", self._on_resize)
 
-    def _section(self, title):
-        ctk.CTkLabel(self.sidebar, text=title,
-                     font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color="#00d4ff").pack(anchor="w", padx=12, pady=(14, 2))
-        ctk.CTkFrame(self.sidebar, height=1, fg_color="#333366").pack(fill="x", padx=12, pady=(0, 4))
+    # ═══════════════════════════════════════════════
+    # SIDEBAR - IMPROVED UI/UX
+    # ═══════════════════════════════════════════════
+    def _build_sidebar(self):
+        # ─── HEADER ─────────────────────────────────
+        header_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        header_frame.pack(pady=(16, 12), padx=12)
+        
+        ctk.CTkLabel(
+            header_frame, text="📷 DIP Studio",
+            font=ctk.CTkFont(size=24, weight="bold"),
+            text_color="#00d4ff"
+        ).pack()
+        ctk.CTkLabel(
+            header_frame, text="Advanced Image Processing",
+            font=ctk.CTkFont(size=10), text_color="#888"
+        ).pack()
 
-    # ──────────────────────────────────────────────
-    # FILE OPS
-    # ──────────────────────────────────────────────
+        # ═══════════════════════════════════════════════
+        # SECTION 1: FILE / IMAGE MANAGEMENT
+        # ═══════════════════════════════════════════════
+        self._create_collapsible_section(
+            title="📁 File Management",
+            color_top="#0066cc",
+            color_buttons="#0066cc",
+            content_fn=self._build_file_section
+        )
+
+        # ═══════════════════════════════════════════════
+        # SECTION 2: ENHANCEMENT & CORRECTIONS
+        # ═══════════════════════════════════════════════
+        self._create_collapsible_section(
+            title="✨ Enhancement",
+            color_top="#1e5f3f",
+            color_buttons="#1e5f3f",
+            content_fn=self._build_enhancement_section
+        )
+
+        # ═══════════════════════════════════════════════
+        # SECTION 3: ADJUSTMENTS (SLIDERS)
+        # ═══════════════════════════════════════════════
+        self._create_collapsible_section(
+            title="🎚️ Adjustments",
+            color_top="#5f5f1e",
+            color_buttons="#666600",
+            content_fn=self._build_adjustments_section
+        )
+
+        # ═══════════════════════════════════════════════
+        # SECTION 4: FILTERS & EFFECTS
+        # ═══════════════════════════════════════════════
+        self._create_collapsible_section(
+            title="🔧 Filters",
+            color_top="#2a4f5f",
+            color_buttons="#2a4f5f",
+            content_fn=self._build_filters_section
+        )
+
+        # ═══════════════════════════════════════════════
+        # SECTION 5: ADVANCED TOOLS
+        # ═══════════════════════════════════════════════
+        self._create_collapsible_section(
+            title="⚙️ Advanced Tools",
+            color_top="#4f3f5f",
+            color_buttons="#4f3f5f",
+            content_fn=self._build_advanced_section
+        )
+
+    def _create_collapsible_section(self, title, color_top, color_buttons, content_fn):
+        """Create a collapsible section with title, divider, and content"""
+        # Header with collapse/expand toggle
+        section_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        section_frame.pack(fill="x", padx=12, pady=(16, 0))
+        
+        # Separator line on top
+        sep = ctk.CTkFrame(section_frame, height=2, fg_color=color_top)
+        sep.pack(fill="x", pady=(0, 8))
+        
+        # Title label
+        title_label = ctk.CTkLabel(
+            section_frame, text=title,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=color_top
+        )
+        title_label.pack(anchor="w", pady=(0, 8))
+        
+        # Content container
+        content_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        content_frame.pack(fill="x", padx=0, pady=(0, 4))
+        
+        # Build content
+        content_fn(content_frame, color_buttons)
+
+    def _build_file_section(self, parent, color):
+        """File Management buttons"""
+        buttons_config = [
+            ("📂 Open Image", self.open_image, "#0066cc", "#0055aa"),
+            ("💾 Save Result", self.save_image, "#006633", "#005522"),
+            ("🔄 Reset to Original", self.reset_image, "#663300", "#552200"),
+        ]
+        
+        for text, cmd, fg_color, hover_color in buttons_config:
+            ctk.CTkButton(
+                parent, text=text,
+                command=cmd,
+                fg_color=fg_color, hover_color=hover_color,
+                height=36, font=ctk.CTkFont(size=10, weight="bold"),
+                corner_radius=6
+            ).pack(fill="x", padx=12, pady=4)
+
+    def _build_enhancement_section(self, parent, color):
+        """Enhancement buttons"""
+        # Two-column grid for better layout
+        btns_config = [
+            ("Auto Contrast", self.apply_histeq, "#1e5f3f"),
+            ("Smart Contrast (CLAHE)", self.apply_clahe, "#1e5f3f"),
+            ("Enhance Blurry", self.apply_enhance_blurry, "#2a7050"),
+            ("Reduce Glare", self.apply_reduce_glare, "#3a8060"),
+            ("Anti-Backlight", self.apply_anti_backlight, "#4a9070"),
+        ]
+        
+        for text, cmd, fg_color in btns_config:
+            ctk.CTkButton(
+                parent, text=text,
+                command=cmd,
+                fg_color=fg_color, hover_color=self._lighten_color(fg_color),
+                height=32, font=ctk.CTkFont(size=9),
+                corner_radius=4
+            ).pack(fill="x", padx=12, pady=2)
+
+    def _build_adjustments_section(self, parent, color):
+        """Slider controls for real-time adjustments"""
+        # Brightness
+        bright_label = ctk.CTkLabel(
+            parent, text="Brightness",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#ffcc00"
+        )
+        bright_label.pack(anchor="w", padx=14, pady=(8, 2))
+        
+        self.bright_slider = ctk.CTkSlider(
+            parent, from_=-100, to=100, number_of_steps=200,
+            command=self._on_brightness_change, fg_color="#666600"
+        )
+        self.bright_slider.set(0)
+        self.bright_slider.pack(fill="x", padx=12, pady=2)
+        
+        self.bright_label = ctk.CTkLabel(
+            parent, text="0", font=ctk.CTkFont(size=9),
+            text_color="#888"
+        )
+        self.bright_label.pack(anchor="e", padx=14, pady=(0, 4))
+
+        # Contrast
+        contrast_label = ctk.CTkLabel(
+            parent, text="Contrast",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#ffcc00"
+        )
+        contrast_label.pack(anchor="w", padx=14, pady=(8, 2))
+        
+        self.contrast_slider = ctk.CTkSlider(
+            parent, from_=0.1, to=3.0, number_of_steps=59,
+            command=self._on_contrast_change, fg_color="#666600"
+        )
+        self.contrast_slider.set(1.0)
+        self.contrast_slider.pack(fill="x", padx=12, pady=2)
+        
+        self.contrast_label = ctk.CTkLabel(
+            parent, text="1.0", font=ctk.CTkFont(size=9),
+            text_color="#888"
+        )
+        self.contrast_label.pack(anchor="e", padx=14, pady=(0, 4))
+
+        # Gamma Correction
+        gamma_label = ctk.CTkLabel(
+            parent, text="Gamma Correction",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#ffcc00"
+        )
+        gamma_label.pack(anchor="w", padx=14, pady=(8, 2))
+        
+        self.gamma_slider = ctk.CTkSlider(
+            parent, from_=0.1, to=5.0, number_of_steps=49,
+            command=self._on_gamma_change, fg_color="#666600"
+        )
+        self.gamma_slider.set(1.0)
+        self.gamma_slider.pack(fill="x", padx=12, pady=2)
+        
+        self.gamma_label = ctk.CTkLabel(
+            parent, text="1.0", font=ctk.CTkFont(size=9),
+            text_color="#888"
+        )
+        self.gamma_label.pack(anchor="e", padx=14, pady=(0, 12))
+
+    def _build_filters_section(self, parent, color):
+        """Filters grouped by type"""
+        # Filter kernel size selector
+        size_label = ctk.CTkLabel(
+            parent, text="Filter Kernel Size",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#88ccff"
+        )
+        size_label.pack(anchor="w", padx=14, pady=(6, 6))
+        
+        self.kernel_var = ctk.StringVar(value="3")
+        ks_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        ks_frame.pack(fill="x", padx=12, pady=2)
+        
+        for k in ["3", "5", "7", "9"]:
+            ctk.CTkRadioButton(
+                ks_frame, text=k, variable=self.kernel_var, value=k,
+                width=50, text_color="#88ccff"
+            ).pack(side="left", padx=3)
+
+        # Smoothing filters
+        smooth_label = ctk.CTkLabel(
+            parent, text="Smoothing",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            text_color="#ccccff"
+        )
+        smooth_label.pack(anchor="w", padx=14, pady=(8, 2))
+        
+        smooth_btns = [
+            ("Mean Filter", self.apply_mean),
+            ("Gaussian Blur", self.apply_gaussian),
+            ("Median (Remove Spots)", self.apply_median),
+        ]
+        
+        for text, cmd in smooth_btns:
+            ctk.CTkButton(
+                parent, text=text,
+                command=cmd,
+                fg_color="#2a4f5f", hover_color="#3a6f7f",
+                height=28, font=ctk.CTkFont(size=9),
+                corner_radius=4
+            ).pack(fill="x", padx=12, pady=2)
+
+        # Edge detection / Enhancement
+        edge_label = ctk.CTkLabel(
+            parent, text="Sharpening & Edges",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            text_color="#ccccff"
+        )
+        edge_label.pack(anchor="w", padx=14, pady=(8, 2))
+        
+        edge_btns = [
+            ("Sharpen", self.apply_laplacian_sharp),
+            ("Detect Edges (Canny)", self.apply_canny),
+        ]
+        
+        for text, cmd in edge_btns:
+            ctk.CTkButton(
+                parent, text=text,
+                command=cmd,
+                fg_color="#2a4f5f", hover_color="#3a6f7f",
+                height=28, font=ctk.CTkFont(size=9),
+                corner_radius=4
+            ).pack(fill="x", padx=12, pady=2)
+
+    def _build_advanced_section(self, parent, color):
+        """Advanced tools"""
+        btns_config = [
+            ("🎯 Draw ROI (Select Area)", self.start_roi_drawing, "#5f3f5f"),
+            ("🤖 Remove Background (AI)", self.remove_bg_ai, "#6f4f7f"),
+            ("📊 Show Histogram", self.show_histogram, "#5f4f6f"),
+        ]
+        
+        for text, cmd, fg_color in btns_config:
+            ctk.CTkButton(
+                parent, text=text,
+                command=cmd,
+                fg_color=fg_color, hover_color=self._lighten_color(fg_color),
+                height=36, font=ctk.CTkFont(size=10, weight="bold"),
+                corner_radius=6
+            ).pack(fill="x", padx=12, pady=4)
+
+    def _lighten_color(self, hex_color):
+        """Lighten a hex color by returning a slightly lighter shade"""
+        # Simple approach: return a brighter version
+        color_map = {
+            "#0066cc": "#0088ff",
+            "#1e5f3f": "#2a8050",
+            "#2a4f5f": "#3a6f7f",
+            "#4f3f5f": "#6f5f7f",
+            "#5f3f5f": "#7f5f7f",
+            "#2a7050": "#3a9060",
+            "#3a8060": "#4aa070",
+            "#4a9070": "#5ab080",
+            "#5f4f6f": "#7f6f8f",
+            "#6f4f7f": "#8f6f9f",
+        }
+        return color_map.get(hex_color, "#00d4ff")
+
+    # ═══════════════════════════════════════════════
+    # MAIN AREA
+    # ═══════════════════════════════════════════════
+    def _build_main_area(self):
+        # Top toolbar
+        toolbar = ctk.CTkFrame(
+            self.main_area, height=42,
+            fg_color=("#1a1a2e", "#0f0f1a")
+        )
+        toolbar.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        toolbar.pack_propagate(False)
+
+        # Status info
+        self.status_label = ctk.CTkLabel(
+            toolbar,
+            text="Open an image to begin",
+            font=ctk.CTkFont(size=11),
+            text_color="#888"
+        )
+        self.status_label.pack(side="left", padx=12, pady=4)
+
+        # Spacer
+        spacer = ctk.CTkFrame(toolbar, fg_color="transparent")
+        spacer.pack(side="left", fill="x", expand=True)
+
+        # View mode buttons
+        ctk.CTkLabel(
+            toolbar, text="View:",
+            font=ctk.CTkFont(size=10)
+        ).pack(side="right", padx=(0, 8))
+        
+        for label, val in [("Original", "original"), ("Processed", "processed"), ("Split", "split")]:
+            ctk.CTkButton(
+                toolbar, text=label, width=90,
+                command=lambda v=val: self.set_view_mode(v),
+                fg_color="#1e3a5f", hover_color="#2a5080",
+                height=28
+            ).pack(side="right", padx=2, pady=3)
+
+        # Main separator
+        sep = ctk.CTkFrame(self.main_area, height=1, fg_color="#333366")
+        sep.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
+
+        # Canvas area with labels and buttons
+        self.canvas_frame = ctk.CTkFrame(self.main_area, fg_color="transparent")
+        self.canvas_frame.grid(row=2, column=0, sticky="nsew", padx=0, pady=0)
+        self.canvas_frame.grid_rowconfigure(0, weight=1)
+        self.canvas_frame.grid_columnconfigure(0, weight=1)
+        self.canvas_frame.grid_columnconfigure(1, weight=1)
+
+        # Original image section
+        self.orig_frame = ctk.CTkFrame(self.canvas_frame, fg_color="transparent")
+        self.orig_frame.grid(row=0, column=0, sticky="nsew", padx=2, pady=0)
+        self.orig_frame.grid_rowconfigure(0, weight=0)
+        self.orig_frame.grid_rowconfigure(1, weight=1)
+        self.orig_frame.grid_rowconfigure(2, weight=0)
+        self.orig_frame.grid_columnconfigure(0, weight=1)
+        
+        label_orig = ctk.CTkLabel(
+            self.orig_frame, text="Current Output",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#aaa", height=16
+        )
+        label_orig.grid(row=0, column=0, sticky="ew", padx=0, pady=2)
+        
+        self.img_orig = ctk.CTkLabel(
+            self.orig_frame, text="Open an image",
+            fg_color=("#0d0d1f", "#050510"), corner_radius=4
+        )
+        self.img_orig.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
+        
+        # Spacer to match button_frame height on right
+        spacer_left = ctk.CTkFrame(self.orig_frame, fg_color="transparent", height=28)
+        spacer_left.grid(row=2, column=0, sticky="ew", padx=0, pady=0)
+        spacer_left.grid_propagate(False)
+
+        # Processed image section with Apply button
+        self.proc_frame = ctk.CTkFrame(self.canvas_frame, fg_color="transparent")
+        self.proc_frame.grid(row=0, column=1, sticky="nsew", padx=2, pady=0)
+        self.proc_frame.grid_rowconfigure(0, weight=0)
+        self.proc_frame.grid_rowconfigure(1, weight=1)
+        self.proc_frame.grid_rowconfigure(2, weight=0)
+        self.proc_frame.grid_columnconfigure(0, weight=1)
+        
+        label_proc = ctk.CTkLabel(
+            self.proc_frame, text="Preview (Editing)",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#00d4ff", height=16
+        )
+        label_proc.grid(row=0, column=0, sticky="ew", padx=0, pady=2)
+        
+        self.img_proc = ctk.CTkLabel(
+            self.proc_frame, text="",
+            fg_color=("#0d0d1f", "#050510"), corner_radius=4
+        )
+        self.img_proc.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
+
+        # Apply button row
+        button_frame = ctk.CTkFrame(self.proc_frame, fg_color="transparent", height=28)
+        button_frame.grid(row=2, column=0, sticky="ew", padx=0, pady=0)
+        button_frame.grid_propagate(False)
+        
+        ctk.CTkButton(
+            button_frame, text="Apply Changes",
+            command=self.apply_changes,
+            fg_color="#00aa44", hover_color="#00cc55",
+            height=26, font=ctk.CTkFont(size=9, weight="bold")
+        ).pack(side="right", padx=2, pady=1)
+        
+        ctk.CTkButton(
+            button_frame, text="Undo",
+            command=self.undo_changes,
+            fg_color="#aa4400", hover_color="#cc5500",
+            height=26, font=ctk.CTkFont(size=9, weight="bold")
+        ).pack(side="right", padx=2, pady=1)
+
+    # ═══════════════════════════════════════════════
+    # FILE OPERATIONS
+    # ═══════════════════════════════════════════════
+    def _normalize_image_size(self, img, target_width=1280):
+        """Resize image to standard width while maintaining aspect ratio"""
+        h, w = img.shape[:2]
+        
+        # If image is smaller than target, upscale it
+        # If larger, downscale to target width
+        if w < target_width:
+            scale = target_width / w
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+        elif w > target_width:
+            scale = target_width / w
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+        return img
+
     def open_image(self):
         path = filedialog.askopenfilename(
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.tiff *.webp"), ("All", "*.*")])
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.tiff *.webp"), ("All", "*.*")]
+        )
         if not path:
             return
+        
         img = cv2.imread(path)
         if img is None:
             messagebox.showerror("Error", "Cannot read image.")
             return
+        
+        # Normalize image size to standard width (1280px)
+        img = self._normalize_image_size(img, target_width=1280)
+        
         self.original_image = img.copy()
         self.current_image = img.copy()
+        self.preview_image = img.copy()
+        self.roi_mask = None
+        
         h, w = img.shape[:2]
-        self.status_label.configure(text=f"{w}×{h} px  |  {path.split('/')[-1]}")
+        filename = path.split('/')[-1]
+        self.status_label.configure(text=f"{filename} ({w}×{h}px)")
+        
         self.refresh_display()
 
     def save_image(self):
         if self.current_image is None:
-            messagebox.showwarning("Warning", "No processed image.")
+            messagebox.showwarning("Warning", "No image to save.")
             return
-        path = filedialog.asksaveasfilename(defaultextension=".png",
-                                             filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg")])
+        
+        path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg"), ("BMP", "*.bmp")]
+        )
+        
         if path:
             cv2.imwrite(path, self.current_image)
-            messagebox.showinfo("Saved", f"Image saved to:\n{path}")
+            messagebox.showinfo("Success", f"Saved to:\n{path}")
 
     def reset_image(self):
-        if self.original_image is not None:
-            self.current_image = self.original_image.copy()
-            self.refresh_display()
-            self.status_label.configure(text="Reset to original")
+        if self.original_image is None:
+            messagebox.showwarning("Warning", "No image loaded.")
+            return
+        
+        self.current_image = self.original_image.copy()
+        self.preview_image = self.original_image.copy()
+        self.roi_mask = None
+        self.refresh_display()
+        self.status_label.configure(text="Reset to original")
 
-    # ──────────────────────────────────────────────
+    # ═══════════════════════════════════════════════
+    # APPLY / UNDO
+    # ═══════════════════════════════════════════════
+    def apply_changes(self):
+        """Confirm and apply all preview changes to current_image"""
+        if self.preview_image is None:
+            messagebox.showwarning("Warning", "No changes to apply.")
+            return
+        
+        if np.array_equal(self.preview_image, self.current_image):
+            messagebox.showinfo("Info", "No changes made.")
+            return
+        
+        self.current_image = self.preview_image.copy()
+        self.preview_image = self.current_image.copy()  # Reset preview = current
+        self.refresh_display()
+        messagebox.showinfo("Success", "Changes applied successfully!")
+
+    def undo_changes(self):
+        """Discard preview changes and restore preview_image to match current_image"""
+        if self.current_image is None:
+            return
+        
+        self.preview_image = self.current_image.copy()
+        self.refresh_display()
+        self.status_label.configure(text="Changes discarded")
+
+    # ═══════════════════════════════════════════════
     # DISPLAY
-    # ──────────────────────────────────────────────
+    # ═══════════════════════════════════════════════
     def set_view_mode(self, mode):
         self.display_mode = mode
         self.refresh_display()
 
     def refresh_display(self):
+        """Refresh display with throttling to prevent lag"""
+        # Cancel previous timer if exists
+        if self.refresh_timer:
+            self.after_cancel(self.refresh_timer)
+            self.refresh_timer = None
+        
+        # Throttle: only refresh every 50ms max
+        current_time = time.time()
+        elapsed = (current_time - self.last_refresh_time) * 1000
+        
+        if elapsed < 50:
+            # Schedule refresh later
+            self.refresh_timer = self.after(50 - int(elapsed), self._do_refresh)
+        else:
+            self._do_refresh()
+    
+    def _do_refresh(self):
+        """Actual display refresh logic"""
+        self.last_refresh_time = time.time()
+        self.refresh_timer = None
+        
         if self.original_image is None:
             return
         
-        # Dùng kích thước cửa sổ chính thay vì canvas_frame
+        # Ensure all images are same size
+        if self.current_image is not None and self.current_image.shape != self.original_image.shape:
+            self.current_image = cv2.resize(self.current_image, (self.original_image.shape[1], self.original_image.shape[0]))
+        
+        if self.preview_image is not None and self.preview_image.shape != self.original_image.shape:
+            self.preview_image = cv2.resize(self.preview_image, (self.original_image.shape[1], self.original_image.shape[0]))
+        
+        # Use window dimensions directly
         win_w = self.winfo_width()
         win_h = self.winfo_height()
         
-        sidebar_w = 310  # chiều rộng sidebar
-        toolbar_h = 60   # chiều cao toolbar
+        # Account for sidebar (280px) and margins
+        canvas_w = max(600, win_w - 300)
+        canvas_h = max(500, win_h - 100)
         
-        available_w = max(win_w - sidebar_w, 800)
-        available_h = max(win_h - toolbar_h - 10, 700)  # trừ toolbar + label
-        
-        w = max(available_w // 2 - 8, 400)
-        h = max(available_h, 750)
+        # Each pane gets half
+        w = (canvas_w - 4) // 2
+        h = canvas_h - 44
 
+        # Control what displays based on view mode
         if self.display_mode == "split":
-            self.label_orig.grid()
-            self.img_proc.grid()
-            self.label_proc.grid()
+            # Split: Left=current output, Right=preview (editing)
+            self._show_cv(self.img_orig, self.current_image, w, h)
+            self._show_cv(self.img_proc, self.preview_image, w, h)
+            self.orig_frame.grid()
+            self.proc_frame.grid()
+        elif self.display_mode == "original":
+            # Compare: Left=original (as uploaded), Right=current (edited)
             self._show_cv(self.img_orig, self.original_image, w, h)
             self._show_cv(self.img_proc, self.current_image, w, h)
-        elif self.display_mode == "original":
-            self.label_orig.grid()
-            self.img_proc.grid_remove()
-            self.label_proc.grid_remove()
-            self._show_cv(self.img_orig, self.original_image, w * 2, h)
-        else:
-            self.label_orig.grid_remove()
-            self.img_orig.grid_remove() if False else None
-            self.label_proc.grid()
-            self.img_proc.grid()
-            self._show_cv(self.img_proc, self.current_image, w * 2, h)
+            self.orig_frame.grid()
+            self.proc_frame.grid()
+        else:  # processed
+            # Processed: Show only right pane with preview
+            self._show_cv(self.img_proc, self.preview_image, w, h)
+            self.orig_frame.grid_remove()
+            self.proc_frame.grid()
 
-    def _show_cv(self, label_widget, bgr_img, max_w, max_h):
-        rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
-        pil = Image.fromarray(rgb)
+    def _show_cv(self, label_widget, bgr_img, max_w, max_h, side=""):
+        """Convert BGR to PIL and display on CTkLabel - maintain aspect ratio"""
+        if bgr_img is None or bgr_img.size == 0:
+            label_widget.configure(image=None, text="No image")
+            return
         
-        # Tính tỉ lệ scale để fit vào max_w x max_h (cả phóng to lẫn thu nhỏ)
+        # For BGRA images (with alpha), convert properly
+        if len(bgr_img.shape) == 3 and bgr_img.shape[2] == 4:
+            rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGRA2RGBA)
+            pil = Image.fromarray(rgb, 'RGBA')
+        else:
+            rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+            pil = Image.fromarray(rgb)
+        
         orig_w, orig_h = pil.size
-        scale = min(max_w / orig_w, max_h / orig_h)
-        new_w = int(orig_w * scale)
-        new_h = int(orig_h * scale)
-        pil = pil.resize((new_w, new_h), Image.LANCZOS)
+        if orig_w <= 0 or orig_h <= 0:
+            label_widget.configure(image=None, text="Invalid image")
+            return
+        
+        # Calculate scale to fit within max bounds
+        # BUT: Never upscale - only downscale if needed
+        scale_w = max_w / orig_w
+        scale_h = max_h / orig_h
+        scale = min(scale_w, scale_h)
+        
+        # Prevent upscaling - only scale down if > 1 means we'd upscale
+        if scale > 1.0:
+            scale = 1.0  # Keep original size, don't upscale
+        
+        # Apply scale
+        new_w = max(1, int(orig_w * scale))
+        new_h = max(1, int(orig_h * scale))
+        
+        if new_w != orig_w or new_h != orig_h:
+            pil = pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
         
         ctk_img = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
         label_widget.configure(image=ctk_img, text="")
-        label_widget._image_ref = ctk_img  # prevent GC
+        label_widget._image_ref = ctk_img
 
     def _on_resize(self, event):
-        self.after(80, self.refresh_display)
+        self.after(100, self.refresh_display)
 
-    def _on_gamma_change(self, val):
-        gamma_val = float(val)
-        if gamma_val < 1.0:
-            status = "← Darker"
-        elif gamma_val > 1.0:
-            status = "Brighter →"
-        else:
-            status = "Normal"
-        self.gamma_label.configure(text=f"{status}  (γ = {gamma_val:.2f})")
-        self.apply_gamma()
-
+    # ═══════════════════════════════════════════════
+    # ADJUSTMENTS (Real-time Preview)
+    # ═══════════════════════════════════════════════
     def _on_brightness_change(self, val):
-        """Real-time preview for brightness adjustment"""
+        b = int(float(val))
+        self.bright_label.configure(text=f"{b:+d}")
         self.apply_brightness_contrast()
 
     def _on_contrast_change(self, val):
-        """Real-time preview for contrast adjustment"""
+        c = float(val)
+        self.contrast_label.configure(text=f"{c:.2f}")
         self.apply_brightness_contrast()
 
-    def _on_unsharp_change(self, val):
-        """Real-time preview for unsharp masking"""
-        self.apply_unsharp()
+    def _on_gamma_change(self, val):
+        gamma_val = float(val)
+        self.gamma_label.configure(
+            text=f"{gamma_val:.2f}" + ("←Darker" if gamma_val < 1 else "→Brighter" if gamma_val > 1 else "")
+        )
+        self.apply_gamma()
 
-    def _on_highboost_change(self, val):
-        """Real-time preview for high boost filter"""
-        self.apply_highboost()
+    def apply_brightness_contrast(self):
+        """Apply brightness and contrast in real-time"""
+        if self.current_image is None:
+            return
+        
+        b = int(self.bright_slider.get())
+        c = self.contrast_slider.get()
+        
+        try:
+            # If ROI mask exists, apply only to ROI
+            if self.roi_mask is not None:
+                result = apply_to_roi(self.current_image, self.roi_mask, brightness_contrast, brightness=b, contrast=c)
+            else:
+                result = brightness_contrast(self.current_image, brightness=b, contrast=c)
+            
+            self.preview_image = result
+            self.refresh_display()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
-    # ──────────────────────────────────────────────
-    # GUARD
-    # ──────────────────────────────────────────────
+    def apply_gamma(self):
+        """Apply gamma correction in real-time"""
+        if self.current_image is None:
+            return
+        
+        g = self.gamma_slider.get()
+        
+        try:
+            # If ROI mask exists, apply only to ROI
+            if self.roi_mask is not None:
+                result = apply_to_roi(self.current_image, self.roi_mask, gamma_correction, gamma=g)
+            else:
+                result = gamma_correction(self.current_image, gamma=g)
+            
+            self.preview_image = result
+            self.refresh_display()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    # ═══════════════════════════════════════════════
+    # ENHANCEMENTS
+    # ═══════════════════════════════════════════════
     def _check(self):
         if self.current_image is None:
             messagebox.showwarning("Warning", "Please open an image first.")
             return False
         return True
 
-    def _apply(self, fn, *args, **kwargs):
+    def _apply_filter(self, fn, *args, **kwargs):
+        """Apply a filter and update preview"""
         if not self._check():
             return
+        
         try:
-            # Apply effect on current_image to preserve previous changes
-            result = fn(self.current_image, *args, **kwargs)
-            self.current_image = result
+            # If ROI mask exists, apply filter only to ROI region
+            if self.roi_mask is not None:
+                result = apply_to_roi(self.current_image, self.roi_mask, fn, *args, **kwargs)
+            else:
+                result = fn(self.current_image, *args, **kwargs)
+            
+            self.preview_image = result
             self.refresh_display()
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-    # ──────────────────────────────────────────────
-    # ENHANCEMENT
-    # ──────────────────────────────────────────────
-    def apply_histeq(self):      self._apply(histogram_equalization)
-    def apply_clahe(self):       self._apply(clahe_enhancement)
-    def apply_log(self):         self._apply(log_transform)
-    def apply_negative(self):    self._apply(negative_transform)
+    def apply_histeq(self):
+        self._apply_filter(histogram_equalization)
 
-    def apply_gamma(self):
-        g = self.gamma_slider.get()
-        self._apply(gamma_correction, gamma=g)
-
-    def apply_contrast_stretch(self):
-        try:
-            rmin = int(self.cs_min.get() or 0)
-            rmax = int(self.cs_max.get() or 255)
-        except ValueError:
-            messagebox.showerror("Error", "Enter valid integer values for r_min and r_max.")
-            return
-        self._apply(contrast_stretching, r_min=rmin, r_max=rmax)
-
-    def apply_brightness_contrast(self):
-        b = int(self.bright_slider.get())
-        c = self.contrast_slider.get()
-        self._apply(brightness_contrast, brightness=b, contrast=c)
+    def apply_clahe(self):
+        self._apply_filter(clahe_enhancement)
 
     def apply_enhance_blurry(self):
-        clahe_clip = 3.0
-        sharpen_strength = 2.0
-        self._apply(enhance_blurry_image, clahe_clip=clahe_clip, sharpen_strength=sharpen_strength)
+        self._apply_filter(enhance_blurry_image, clahe_clip=3.0, sharpen_strength=2.0)
 
     def apply_reduce_glare(self):
-        self._apply(reduce_glare_exposure, gamma=1.5, clahe_clip=2.5, highlights_recover=0.4)
+        self._apply_filter(reduce_glare_exposure, gamma=1.5, clahe_clip=2.5, highlights_recover=0.4)
 
     def apply_anti_backlight(self):
-        self._apply(anti_backlight_enhancement, shadow_boost=1.3, highlight_reduce=0.7)
+        self._apply_filter(anti_backlight_enhancement, shadow_boost=1.3, highlight_reduce=0.7)
 
-    # ──────────────────────────────────────────────
-    # NOISE
-    # ──────────────────────────────────────────────
-    def add_salt_pepper(self):
-        amt = self.noise_amount.get()
-        self._apply(add_salt_pepper_noise, amount=amt)
-
-    def add_gaussian(self):
-        amt = self.noise_amount.get()
-        self._apply(add_gaussian_noise, sigma=amt * 255)
-
-    def add_speckle(self):
-        amt = self.noise_amount.get()
-        self._apply(add_speckle_noise, amount=amt)
-
-    # ──────────────────────────────────────────────
+    # ═══════════════════════════════════════════════
     # FILTERS
-    # ──────────────────────────────────────────────
+    # ═══════════════════════════════════════════════
     def _ksize(self):
-        k = int(self.kernel_var.get())
-        return k
+        return int(self.kernel_var.get())
 
-    def apply_mean(self):      self._apply(mean_filter,     ksize=self._ksize())
-    def apply_gaussian(self):  self._apply(gaussian_filter, ksize=self._ksize())
-    def apply_median(self):    self._apply(median_filter,   ksize=self._ksize())
+    def apply_mean(self):
+        self._apply_filter(mean_filter, ksize=self._ksize())
 
-    def apply_laplacian_sharp(self): self._apply(laplacian_sharpen)
-    def apply_sobel(self):           self._apply(sobel_edge)
-    def apply_prewitt(self):         self._apply(prewitt_edge)
-    def apply_laplacian_edge(self):  self._apply(laplacian_edge)
-    def apply_canny(self):           self._apply(canny_edge)
+    def apply_gaussian(self):
+        self._apply_filter(gaussian_filter, ksize=self._ksize())
 
-    def apply_unsharp(self):
-        k = self.unsharp_k.get()
-        self.unsharp_label.configure(text=f"Strength: {k:.2f}")
-        self._apply(unsharp_masking, k=k)
+    def apply_median(self):
+        self._apply_filter(median_filter, ksize=self._ksize())
 
-    def apply_highboost(self):
-        a = self.highboost_a.get()
-        self.highboost_label.configure(text=f"Intensity: {a:.2f}")
-        self._apply(high_boost_filter, A=a)
+    def apply_laplacian_sharp(self):
+        self._apply_filter(laplacian_sharpen)
 
-    def apply_custom_kernel(self):
+    def apply_canny(self):
+        self._apply_filter(canny_edge)
+
+    # ═══════════════════════════════════════════════
+    # ROI & SEGMENTATION
+    # ═══════════════════════════════════════════════
+    def start_roi_drawing(self):
+        """Start ROI selection mode"""
         if not self._check():
             return
+        
+        if self.roi_mask is not None:
+            if messagebox.askyesno("Existing ROI", "Clear existing ROI and draw new one?"):
+                self.roi_mask = None
+            else:
+                return
+        
+        messagebox.showinfo(
+            "Draw ROI",
+            "Click and drag to draw a rectangle on the image.\n\n"
+            "The selected area will be used for future edits.\n\n"
+            "Close this dialog then click on the image to start."
+        )
+        
+        # Create a temporary window for ROI drawing
+        self._show_roi_window()
+
+    def _show_roi_window(self):
+        """Display image in a window for ROI selection"""
+        from tkinter import Canvas, messagebox as tk_messagebox
+        
+        roi_win = ctk.CTkToplevel(self)
+        roi_win.title("Draw ROI - Click and Drag to Select Area")
+        roi_win.geometry("1000x650")
+        
+        # Convert image for display
+        rgb = cv2.cvtColor(self.current_image, cv2.COLOR_BGR2RGB)
+        orig_h, orig_w = rgb.shape[:2]
+        
+        # Resize for display
+        max_w, max_h = 950, 600
+        scale_w = max_w / orig_w if orig_w > 0 else 1
+        scale_h = max_h / orig_h if orig_h > 0 else 1
+        scale = min(scale_w, scale_h)
+        
+        display_w = int(orig_w * scale)
+        display_h = int(orig_h * scale)
+        
+        rgb_resized = cv2.resize(rgb, (display_w, display_h))
+        pil = Image.fromarray(rgb_resized)
+        photo = ImageTk.PhotoImage(pil)
+        
+        # Create Canvas for event binding
+        canvas = Canvas(roi_win, bg="black", width=display_w, height=display_h, cursor="crosshair")
+        canvas.pack(padx=10, pady=10)
+        
+        # Display image on canvas
+        canvas.create_image(0, 0, image=photo, anchor="nw")
+        canvas.image = photo  # Keep reference
+        
+        # Drawing state
+        drawing = [False]
+        start_pos = [None]
+        rect_id = [None]
+        
+        def on_mouse_down(event):
+            drawing[0] = True
+            start_pos[0] = (event.x, event.y)
+            # Clear previous rect
+            if rect_id[0]:
+                canvas.delete(rect_id[0])
+                rect_id[0] = None
+        
+        def on_mouse_drag(event):
+            if not drawing[0] or start_pos[0] is None:
+                return
+            
+            # Clear previous rect
+            if rect_id[0]:
+                canvas.delete(rect_id[0])
+            
+            # Draw new rect preview
+            x1, y1 = start_pos[0]
+            x2, y2 = event.x, event.y
+            rect_id[0] = canvas.create_rectangle(
+                x1, y1, x2, y2, 
+                outline="lime", width=2
+            )
+        
+        def on_mouse_up(event):
+            if not drawing[0]:
+                return
+            
+            drawing[0] = False
+            end_pos = (event.x, event.y)
+            
+            if start_pos[0] is None:
+                return
+            
+            # Get coordinates in display space
+            x1_disp = min(start_pos[0][0], end_pos[0])
+            x2_disp = max(start_pos[0][0], end_pos[0])
+            y1_disp = min(start_pos[0][1], end_pos[1])
+            y2_disp = max(start_pos[0][1], end_pos[1])
+            
+            # Minimum size check
+            if (x2_disp - x1_disp) < 10 or (y2_disp - y1_disp) < 10:
+                messagebox.showwarning("Too small", "ROI area too small. Please draw a larger area.")
+                roi_win.destroy()
+                return
+            
+            # Convert to original image coordinates
+            if scale > 0:
+                x1 = int(x1_disp / scale)
+                x2 = int(x2_disp / scale)
+                y1 = int(y1_disp / scale)
+                y2 = int(y2_disp / scale)
+            else:
+                x1, x2, y1, y2 = 0, orig_w, 0, orig_h
+            
+            # Clamp to bounds
+            x1 = max(0, min(x1, orig_w - 1))
+            x2 = max(x1 + 1, min(x2, orig_w))
+            y1 = max(0, min(y1, orig_h - 1))
+            y2 = max(y1 + 1, min(y2, orig_h))
+            
+            # Create mask
+            mask = np.zeros((orig_h, orig_w), dtype=np.uint8)
+            mask[y1:y2, x1:x2] = 255
+            
+            self.roi_mask = mask
+            self.status_label.configure(
+                text=f"ROI selected: ({x1},{y1}) to ({x2},{y2}) - Area: {(x2-x1)*(y2-y1)}px²"
+            )
+            
+            roi_win.destroy()
+            messagebox.showinfo("Success", f"ROI selected! Size: {x2-x1}x{y2-y1} pixels\n\nFilters will be applied to this area only.")
+        
+        # Bind events
+        canvas.bind("<Button-1>", on_mouse_down)
+        canvas.bind("<B1-Motion>", on_mouse_drag)
+        canvas.bind("<ButtonRelease-1>", on_mouse_up)
+        
+        # Instructions
+        info = ctk.CTkLabel(
+            roi_win,
+            text="Click and drag to draw a rectangle around the area you want to edit",
+            font=ctk.CTkFont(size=10),
+            text_color="#888"
+        )
+        info.pack(pady=5)
+
+    def remove_bg_ai(self):
+        """Remove background using AI"""
+        if not self._check():
+            return
+        
         try:
-            matrix = []
-            for row in self.kernel_entries:
-                matrix.append([float(e.get()) for e in row])
-            kernel = np.array(matrix, dtype=np.float32)
-        except ValueError:
-            messagebox.showerror("Error", "All kernel cells must be numbers.")
-            return
-        self._apply(custom_kernel_filter, kernel=kernel)
+            self.status_label.configure(text="Processing... removing background...")
+            self.update()
+            
+            result = remove_background_selfie(self.current_image)
+            self.preview_image = result
+            self.refresh_display()
+            
+            self.status_label.configure(text="Background removed successfully!")
+        except ImportError:
+            messagebox.showerror(
+                "Missing Module",
+                "MediaPipe not installed.\n\nRun: pip install mediapipe"
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to remove background:\n{str(e)}")
 
-    # ──────────────────────────────────────────────
+    # ═══════════════════════════════════════════════
     # HISTOGRAM
-    # ──────────────────────────────────────────────
+    # ═══════════════════════════════════════════════
     def show_histogram(self):
+        """Display histogram comparison window"""
         if not self._check():
             return
+        
         win = ctk.CTkToplevel(self)
         win.title("Histogram Comparison")
-        win.geometry("860x420")
+        win.geometry("1000x450")
         win.configure(fg_color="#0a0a1a")
-
-        fig, axes = plt.subplots(1, 2, figsize=(10, 4), facecolor="#0a0a1a")
+        
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4), facecolor="#0a0a1a")
         colors_bgr = ['#3399ff', '#00cc66', '#ff4444']
         labels = ['Blue', 'Green', 'Red']
-
-        for ax, img, title in zip(axes,
-                                   [self.original_image, self.current_image],
-                                   ["Original", "Processed"]):
+        
+        for ax, img, title in zip(
+            axes,
+            [self.original_image, self.current_image],
+            ["Original", "Current"]
+        ):
             ax.set_facecolor("#0d0d1f")
-            ax.set_title(title, color="#00d4ff", fontsize=13)
+            ax.set_title(title, color="#00d4ff", fontsize=13, weight="bold")
             ax.tick_params(colors="#888")
+            
             for spine in ax.spines.values():
                 spine.set_edgecolor("#333")
+            
             if len(img.shape) == 2:
-                ax.plot(cv2.calcHist([img], [0], None, [256], [0, 256]),
-                        color="#00d4ff", linewidth=1.2)
-            else:
+                hist = cv2.calcHist([img], [0], None, [256], [0, 256])
+                ax.plot(hist, color="#00d4ff", linewidth=1.5)
+            elif img.shape[2] == 3:
                 for i, (c, lbl) in enumerate(zip(colors_bgr, labels)):
                     hist = cv2.calcHist([img], [i], None, [256], [0, 256])
-                    ax.plot(hist, color=c, linewidth=1.2, label=lbl, alpha=0.85)
+                    ax.plot(hist, color=c, linewidth=1.5, label=lbl, alpha=0.85)
                 ax.legend(facecolor="#111", labelcolor="white", fontsize=9)
+            
             ax.set_xlim([0, 256])
-
+        
         plt.tight_layout(pad=2)
         canvas = FigureCanvasTkAgg(fig, master=win)
         canvas.draw()
@@ -590,4 +1048,5 @@ class DIPTool(ctk.CTk):
 
 if __name__ == "__main__":
     app = DIPTool()
+    app.display_mode = "split"
     app.mainloop()
