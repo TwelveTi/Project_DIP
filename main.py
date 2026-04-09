@@ -29,7 +29,7 @@ from processing.noise import (
 )
 from processing.segmentation import (
     remove_background_selfie, remove_background_simple,
-    apply_to_roi
+    apply_to_roi, segment_object_from_rect
 )
 
 ctk.set_appearance_mode("dark")
@@ -833,7 +833,7 @@ class DIPTool(ctk.CTk):
     # ROI & SEGMENTATION
     # ═══════════════════════════════════════════════
     def start_roi_drawing(self):
-        """Start ROI selection mode"""
+        """Start object selection mode"""
         if not self._check():
             return
         
@@ -844,9 +844,9 @@ class DIPTool(ctk.CTk):
                 return
         
         messagebox.showinfo(
-            "Draw ROI",
-            "Click and drag to draw a rectangle on the image.\n\n"
-            "The selected area will be used for future edits.\n\n"
+            "Select Object",
+            "Click and drag to draw a rectangle around the object you want to edit.\n\n"
+            "The app will try to detect the object inside that box and build a mask for future edits.\n\n"
             "Close this dialog then click on the image to start."
         )
         
@@ -854,11 +854,11 @@ class DIPTool(ctk.CTk):
         self._show_roi_window()
 
     def _show_roi_window(self):
-        """Display image in a window for ROI selection"""
-        from tkinter import Canvas, messagebox as tk_messagebox
+        """Display image in a window for object-based ROI selection"""
+        from tkinter import Canvas
         
         roi_win = ctk.CTkToplevel(self)
-        roi_win.title("Draw ROI - Click and Drag to Select Area")
+        roi_win.title("Select Object - Click and Drag Around the Object")
         roi_win.geometry("1000x650")
         
         # Convert image for display
@@ -952,17 +952,28 @@ class DIPTool(ctk.CTk):
             y1 = max(0, min(y1, orig_h - 1))
             y2 = max(y1 + 1, min(y2, orig_h))
             
-            # Create mask
-            mask = np.zeros((orig_h, orig_w), dtype=np.uint8)
-            mask[y1:y2, x1:x2] = 255
+            # Segment the object inside the rectangle.
+            try:
+                mask = segment_object_from_rect(self.current_image, (x1, y1, x2, y2))
+            except Exception as exc:
+                use_rect = messagebox.askyesno(
+                    "Segmentation failed",
+                    f"Could not isolate the object inside the selected area.\n\n{exc}\n\nUse the full rectangle as ROI instead?"
+                )
+                if not use_rect:
+                    return
+
+                mask = np.zeros((orig_h, orig_w), dtype=np.uint8)
+                mask[y1:y2, x1:x2] = 255
             
             self.roi_mask = mask
+            mask_area = int(cv2.countNonZero(mask))
             self.status_label.configure(
-                text=f"ROI selected: ({x1},{y1}) to ({x2},{y2}) - Area: {(x2-x1)*(y2-y1)}px²"
+                text=f"Object selected: ({x1},{y1}) to ({x2},{y2}) - Mask area: {mask_area}px²"
             )
             
             roi_win.destroy()
-            messagebox.showinfo("Success", f"ROI selected! Size: {x2-x1}x{y2-y1} pixels\n\nFilters will be applied to this area only.")
+            messagebox.showinfo("Success", f"Object selected!\n\nFilters will be applied to the detected object only.")
         
         # Bind events
         canvas.bind("<Button-1>", on_mouse_down)
@@ -972,7 +983,7 @@ class DIPTool(ctk.CTk):
         # Instructions
         info = ctk.CTkLabel(
             roi_win,
-            text="Click and drag to draw a rectangle around the area you want to edit",
+            text="Click and drag to draw a rectangle around the object you want to edit",
             font=ctk.CTkFont(size=10),
             text_color="#888"
         )

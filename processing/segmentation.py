@@ -122,6 +122,100 @@ def apply_to_roi(image, roi_mask, processing_func, *args, **kwargs):
     return result
 
 
+def segment_object_from_rect(image, rect, iterations=6, border_margin_ratio=0.08, tighten_iterations=1):
+    """
+    Segment the most likely object inside a user-drawn rectangle.
+
+    Args:
+        image: Input BGR image
+        rect: (x1, y1, x2, y2) rectangle drawn by the user
+        iterations: GrabCut refinement iterations
+
+    Returns:
+        Binary mask where the segmented object is white (255)
+    """
+    if image is None:
+        raise ValueError("Image is required for segmentation")
+
+    h, w = image.shape[:2]
+    x1, y1, x2, y2 = rect
+
+    x1 = max(0, min(int(x1), w - 1))
+    y1 = max(0, min(int(y1), h - 1))
+    x2 = max(x1 + 1, min(int(x2), w))
+    y2 = max(y1 + 1, min(int(y2), h))
+
+    rect_w = x2 - x1
+    rect_h = y2 - y1
+    if rect_w < 5 or rect_h < 5:
+        raise ValueError("Selection is too small for object segmentation")
+
+    mask = np.full((h, w), cv2.GC_BGD, np.uint8)
+    bgd_model = np.zeros((1, 65), np.float64)
+    fgd_model = np.zeros((1, 65), np.float64)
+
+    margin_x = max(1, int(rect_w * border_margin_ratio))
+    margin_y = max(1, int(rect_h * border_margin_ratio))
+    inner_x1 = min(x2 - 1, x1 + margin_x)
+    inner_y1 = min(y2 - 1, y1 + margin_y)
+    inner_x2 = max(inner_x1 + 1, x2 - margin_x)
+    inner_y2 = max(inner_y1 + 1, y2 - margin_y)
+
+    # Help GrabCut by marking the selection border as probable background
+    # and the center as probable foreground.
+    mask[y1:y2, x1:x2] = cv2.GC_PR_BGD
+    mask[inner_y1:inner_y2, inner_x1:inner_x2] = cv2.GC_PR_FGD
+
+    try:
+        cv2.grabCut(
+            image,
+            mask,
+            (x1, y1, rect_w, rect_h),
+            bgd_model,
+            fgd_model,
+            iterCount=max(1, int(iterations)),
+            mode=cv2.GC_INIT_WITH_MASK,
+        )
+    except cv2.error as exc:
+        try:
+            mask = np.zeros((h, w), np.uint8)
+            cv2.grabCut(
+                image,
+                mask,
+                (x1, y1, rect_w, rect_h),
+                bgd_model,
+                fgd_model,
+                iterCount=max(1, int(iterations)),
+                mode=cv2.GC_INIT_WITH_RECT,
+            )
+        except cv2.error as fallback_exc:
+            raise ValueError(f"GrabCut failed: {fallback_exc}") from fallback_exc
+
+    binary_mask = np.where(
+        (mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD),
+        255,
+        0,
+    ).astype(np.uint8)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    if tighten_iterations > 0:
+        binary_mask = cv2.erode(binary_mask, kernel, iterations=int(tighten_iterations))
+
+    # Keep the strongest connected component to avoid loose background fragments.
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
+    if num_labels > 1:
+        largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+        binary_mask = np.where(labels == largest_label, 255, 0).astype(np.uint8)
+
+    if cv2.countNonZero(binary_mask) == 0:
+        raise ValueError("No object could be segmented inside the selected area")
+
+    return binary_mask
+
+
 def apply_edge_blur(image, blur_strength=15):
     """Blur edges to blend ROI naturally"""
     kernel_size = blur_strength | 1  # Ensure odd number
