@@ -29,7 +29,7 @@ from processing.noise import (
 )
 from processing.segmentation import (
     remove_background_selfie, remove_background_simple,
-    apply_to_roi, segment_object_from_rect
+    apply_to_roi, segment_object_from_lasso, segment_object_from_rect
 )
 
 ctk.set_appearance_mode("dark")
@@ -40,12 +40,31 @@ class DIPTool(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("DIP Tool — Advanced Image Processing")
+
+        self.ui = {
+            "bg": "#0e1116",
+            "sidebar": "#121821",
+            "main": "#0f141b",
+            "panel": "#171e28",
+            "panel_alt": "#1c2430",
+            "border": "#2a3441",
+            "accent": "#4aa3a2",
+            "accent_hover": "#5ab5b4",
+            "success": "#2f8f66",
+            "success_hover": "#38a878",
+            "danger": "#b56c4c",
+            "danger_hover": "#c57b58",
+            "muted": "#95a2b0",
+            "text": "#e9eef3",
+            "title": "#ffffff",
+            "font": "Segoe UI",
+        }
+        self.configure(fg_color=self.ui["bg"])
         
-        # Get screen dimensions and maximize window
+        # Start with screen-sized geometry, then force maximize after render.
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
         self.geometry(f"{screen_width}x{screen_height}+0+0")
-        self.state('zoomed')  # Maximize on Windows
         self.minsize(1300, 750)
 
         self.original_image = None
@@ -56,12 +75,42 @@ class DIPTool(ctk.CTk):
         self.roi_start = None
         self.roi_points = []
         self.display_mode = "split"
+        self.is_fullscreen = False
         
         # Throttle refresh to avoid lag
         self.last_refresh_time = 0
         self.refresh_timer = None
+        self.adjust_timer = None
+        self.pending_adjustment = None
         
         self._build_ui()
+        self.after(50, self._apply_startup_window_state)
+        self.bind("<F11>", self._toggle_fullscreen)
+        self.bind("<Escape>", self._exit_fullscreen)
+
+    def _apply_startup_window_state(self):
+        """Force maximized state after the window is mapped (more reliable on Windows/Spyder)."""
+        try:
+            self.state("zoomed")
+        except Exception:
+            pass
+
+        # Fallback: force exact screen bounds if zoomed is ignored by host environment.
+        self.update_idletasks()
+        if self.winfo_width() < self.winfo_screenwidth() - 40 or self.winfo_height() < self.winfo_screenheight() - 40:
+            self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
+
+    def _toggle_fullscreen(self, event=None):
+        self.is_fullscreen = not self.is_fullscreen
+        self.attributes("-fullscreen", self.is_fullscreen)
+        if not self.is_fullscreen:
+            self.after(10, self._apply_startup_window_state)
+
+    def _exit_fullscreen(self, event=None):
+        if self.is_fullscreen:
+            self.is_fullscreen = False
+            self.attributes("-fullscreen", False)
+            self.after(10, self._apply_startup_window_state)
 
     def _build_ui(self):
         # Main layout: sidebar + main area
@@ -71,13 +120,14 @@ class DIPTool(ctk.CTk):
         # ─── LEFT SIDEBAR ───────────────────────────
         self.sidebar = ctk.CTkScrollableFrame(
             self, width=280, corner_radius=0,
-            fg_color=("#1a1a2e", "#0f0f1a")
+            fg_color=self.ui["sidebar"],
+            border_width=0
         )
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         self._build_sidebar()
 
         # ─── RIGHT MAIN AREA ────────────────────────
-        self.main_area = ctk.CTkFrame(self, fg_color=("#111122", "#08080f"))
+        self.main_area = ctk.CTkFrame(self, fg_color=self.ui["main"])
         self.main_area.grid(row=0, column=1, sticky="nsew", padx=0, pady=0)
         self.main_area.grid_rowconfigure(2, weight=1)
         self.main_area.grid_columnconfigure(0, weight=1)
@@ -94,22 +144,23 @@ class DIPTool(ctk.CTk):
         header_frame.pack(pady=(16, 12), padx=12)
         
         ctk.CTkLabel(
-            header_frame, text="📷 DIP Studio",
-            font=ctk.CTkFont(size=24, weight="bold"),
-            text_color="#00d4ff"
+            header_frame, text="DIP Studio",
+            font=ctk.CTkFont(family=self.ui["font"], size=24, weight="bold"),
+            text_color=self.ui["title"]
         ).pack()
         ctk.CTkLabel(
-            header_frame, text="Advanced Image Processing",
-            font=ctk.CTkFont(size=10), text_color="#888"
+            header_frame, text="Image editing workspace",
+            font=ctk.CTkFont(family=self.ui["font"], size=10),
+            text_color=self.ui["muted"]
         ).pack()
 
         # ═══════════════════════════════════════════════
         # SECTION 1: FILE / IMAGE MANAGEMENT
         # ═══════════════════════════════════════════════
         self._create_collapsible_section(
-            title="📁 File Management",
-            color_top="#0066cc",
-            color_buttons="#0066cc",
+            title="File",
+            color_top=self.ui["accent"],
+            color_buttons=self.ui["panel_alt"],
             content_fn=self._build_file_section
         )
 
@@ -117,9 +168,9 @@ class DIPTool(ctk.CTk):
         # SECTION 2: ENHANCEMENT & CORRECTIONS
         # ═══════════════════════════════════════════════
         self._create_collapsible_section(
-            title="✨ Enhancement",
-            color_top="#1e5f3f",
-            color_buttons="#1e5f3f",
+            title="Enhance",
+            color_top=self.ui["accent"],
+            color_buttons=self.ui["panel_alt"],
             content_fn=self._build_enhancement_section
         )
 
@@ -127,9 +178,9 @@ class DIPTool(ctk.CTk):
         # SECTION 3: ADJUSTMENTS (SLIDERS)
         # ═══════════════════════════════════════════════
         self._create_collapsible_section(
-            title="🎚️ Adjustments",
-            color_top="#5f5f1e",
-            color_buttons="#666600",
+            title="Adjust",
+            color_top=self.ui["accent"],
+            color_buttons=self.ui["panel_alt"],
             content_fn=self._build_adjustments_section
         )
 
@@ -137,9 +188,9 @@ class DIPTool(ctk.CTk):
         # SECTION 4: FILTERS & EFFECTS
         # ═══════════════════════════════════════════════
         self._create_collapsible_section(
-            title="🔧 Filters",
-            color_top="#2a4f5f",
-            color_buttons="#2a4f5f",
+            title="Filters",
+            color_top=self.ui["accent"],
+            color_buttons=self.ui["panel_alt"],
             content_fn=self._build_filters_section
         )
 
@@ -147,9 +198,9 @@ class DIPTool(ctk.CTk):
         # SECTION 5: ADVANCED TOOLS
         # ═══════════════════════════════════════════════
         self._create_collapsible_section(
-            title="⚙️ Advanced Tools",
-            color_top="#4f3f5f",
-            color_buttons="#4f3f5f",
+            title="Tools",
+            color_top=self.ui["accent"],
+            color_buttons=self.ui["panel_alt"],
             content_fn=self._build_advanced_section
         )
 
@@ -166,14 +217,20 @@ class DIPTool(ctk.CTk):
         # Title label
         title_label = ctk.CTkLabel(
             section_frame, text=title,
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=color_top
+            font=ctk.CTkFont(family=self.ui["font"], size=12, weight="bold"),
+            text_color=self.ui["title"]
         )
         title_label.pack(anchor="w", pady=(0, 8))
         
         # Content container
-        content_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        content_frame.pack(fill="x", padx=0, pady=(0, 4))
+        content_frame = ctk.CTkFrame(
+            self.sidebar,
+            fg_color=self.ui["panel"],
+            corner_radius=12,
+            border_width=1,
+            border_color=self.ui["border"]
+        )
+        content_frame.pack(fill="x", padx=12, pady=(0, 4))
         
         # Build content
         content_fn(content_frame, color_buttons)
@@ -181,9 +238,9 @@ class DIPTool(ctk.CTk):
     def _build_file_section(self, parent, color):
         """File Management buttons"""
         buttons_config = [
-            ("📂 Open Image", self.open_image, "#0066cc", "#0055aa"),
-            ("💾 Save Result", self.save_image, "#006633", "#005522"),
-            ("🔄 Reset to Original", self.reset_image, "#663300", "#552200"),
+            ("Open Image", self.open_image, self.ui["panel_alt"], self.ui["accent"]),
+            ("Save Result", self.save_image, self.ui["panel_alt"], self.ui["success"]),
+            ("Reset to Original", self.reset_image, self.ui["panel_alt"], self.ui["danger"]),
         ]
         
         for text, cmd, fg_color, hover_color in buttons_config:
@@ -191,122 +248,122 @@ class DIPTool(ctk.CTk):
                 parent, text=text,
                 command=cmd,
                 fg_color=fg_color, hover_color=hover_color,
-                height=36, font=ctk.CTkFont(size=10, weight="bold"),
-                corner_radius=6
-            ).pack(fill="x", padx=12, pady=4)
+                height=38, font=ctk.CTkFont(family=self.ui["font"], size=10, weight="bold"),
+                corner_radius=10, border_width=1, border_color=self.ui["border"]
+            ).pack(fill="x", padx=10, pady=5)
 
     def _build_enhancement_section(self, parent, color):
         """Enhancement buttons"""
         # Two-column grid for better layout
         btns_config = [
-            ("Auto Contrast", self.apply_histeq, "#1e5f3f"),
-            ("Smart Contrast (CLAHE)", self.apply_clahe, "#1e5f3f"),
-            ("Enhance Blurry", self.apply_enhance_blurry, "#2a7050"),
-            ("Reduce Glare", self.apply_reduce_glare, "#3a8060"),
-            ("Anti-Backlight", self.apply_anti_backlight, "#4a9070"),
+            ("Auto Contrast", self.apply_histeq, self.ui["panel_alt"]),
+            ("Smart Contrast (CLAHE)", self.apply_clahe, self.ui["panel_alt"]),
+            ("Enhance Blurry", self.apply_enhance_blurry, self.ui["panel_alt"]),
+            ("Reduce Glare", self.apply_reduce_glare, self.ui["panel_alt"]),
+            ("Anti-Backlight", self.apply_anti_backlight, self.ui["panel_alt"]),
         ]
         
         for text, cmd, fg_color in btns_config:
             ctk.CTkButton(
                 parent, text=text,
                 command=cmd,
-                fg_color=fg_color, hover_color=self._lighten_color(fg_color),
-                height=32, font=ctk.CTkFont(size=9),
-                corner_radius=4
-            ).pack(fill="x", padx=12, pady=2)
+                fg_color=fg_color, hover_color=self.ui["accent"],
+                height=34, font=ctk.CTkFont(family=self.ui["font"], size=9),
+                corner_radius=8, border_width=1, border_color=self.ui["border"]
+            ).pack(fill="x", padx=10, pady=4)
 
     def _build_adjustments_section(self, parent, color):
         """Slider controls for real-time adjustments"""
         # Brightness
         bright_label = ctk.CTkLabel(
             parent, text="Brightness",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#ffcc00"
+            font=ctk.CTkFont(family=self.ui["font"], size=10, weight="bold"),
+            text_color=self.ui["text"]
         )
-        bright_label.pack(anchor="w", padx=14, pady=(8, 2))
+        bright_label.pack(anchor="w", padx=12, pady=(10, 2))
         
         self.bright_slider = ctk.CTkSlider(
             parent, from_=-100, to=100, number_of_steps=200,
-            command=self._on_brightness_change, fg_color="#666600"
+            command=self._on_brightness_change, fg_color=self.ui["accent"]
         )
         self.bright_slider.set(0)
         self.bright_slider.pack(fill="x", padx=12, pady=2)
         
         self.bright_label = ctk.CTkLabel(
             parent, text="0", font=ctk.CTkFont(size=9),
-            text_color="#888"
+            text_color=self.ui["muted"]
         )
-        self.bright_label.pack(anchor="e", padx=14, pady=(0, 4))
+        self.bright_label.pack(anchor="e", padx=12, pady=(0, 6))
 
         # Contrast
         contrast_label = ctk.CTkLabel(
             parent, text="Contrast",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#ffcc00"
+            font=ctk.CTkFont(family=self.ui["font"], size=10, weight="bold"),
+            text_color=self.ui["text"]
         )
-        contrast_label.pack(anchor="w", padx=14, pady=(8, 2))
+        contrast_label.pack(anchor="w", padx=12, pady=(10, 2))
         
         self.contrast_slider = ctk.CTkSlider(
             parent, from_=0.1, to=3.0, number_of_steps=59,
-            command=self._on_contrast_change, fg_color="#666600"
+            command=self._on_contrast_change, fg_color=self.ui["accent"]
         )
         self.contrast_slider.set(1.0)
         self.contrast_slider.pack(fill="x", padx=12, pady=2)
         
         self.contrast_label = ctk.CTkLabel(
             parent, text="1.0", font=ctk.CTkFont(size=9),
-            text_color="#888"
+            text_color=self.ui["muted"]
         )
-        self.contrast_label.pack(anchor="e", padx=14, pady=(0, 4))
+        self.contrast_label.pack(anchor="e", padx=12, pady=(0, 6))
 
         # Gamma Correction
         gamma_label = ctk.CTkLabel(
             parent, text="Gamma Correction",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#ffcc00"
+            font=ctk.CTkFont(family=self.ui["font"], size=10, weight="bold"),
+            text_color=self.ui["text"]
         )
-        gamma_label.pack(anchor="w", padx=14, pady=(8, 2))
+        gamma_label.pack(anchor="w", padx=12, pady=(10, 2))
         
         self.gamma_slider = ctk.CTkSlider(
             parent, from_=0.1, to=5.0, number_of_steps=49,
-            command=self._on_gamma_change, fg_color="#666600"
+            command=self._on_gamma_change, fg_color=self.ui["accent"]
         )
         self.gamma_slider.set(1.0)
         self.gamma_slider.pack(fill="x", padx=12, pady=2)
         
         self.gamma_label = ctk.CTkLabel(
             parent, text="1.0", font=ctk.CTkFont(size=9),
-            text_color="#888"
+            text_color=self.ui["muted"]
         )
-        self.gamma_label.pack(anchor="e", padx=14, pady=(0, 12))
+        self.gamma_label.pack(anchor="e", padx=12, pady=(0, 10))
 
     def _build_filters_section(self, parent, color):
         """Filters grouped by type"""
         # Filter kernel size selector
         size_label = ctk.CTkLabel(
             parent, text="Filter Kernel Size",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#88ccff"
+            font=ctk.CTkFont(family=self.ui["font"], size=10, weight="bold"),
+            text_color=self.ui["text"]
         )
-        size_label.pack(anchor="w", padx=14, pady=(6, 6))
+        size_label.pack(anchor="w", padx=12, pady=(10, 6))
         
         self.kernel_var = ctk.StringVar(value="3")
         ks_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        ks_frame.pack(fill="x", padx=12, pady=2)
+        ks_frame.pack(fill="x", padx=10, pady=2)
         
         for k in ["3", "5", "7", "9"]:
             ctk.CTkRadioButton(
                 ks_frame, text=k, variable=self.kernel_var, value=k,
-                width=50, text_color="#88ccff"
+                width=50, text_color=self.ui["muted"]
             ).pack(side="left", padx=3)
 
         # Smoothing filters
         smooth_label = ctk.CTkLabel(
             parent, text="Smoothing",
-            font=ctk.CTkFont(size=9, weight="bold"),
-            text_color="#ccccff"
+            font=ctk.CTkFont(family=self.ui["font"], size=9, weight="bold"),
+            text_color=self.ui["muted"]
         )
-        smooth_label.pack(anchor="w", padx=14, pady=(8, 2))
+        smooth_label.pack(anchor="w", padx=12, pady=(10, 2))
         
         smooth_btns = [
             ("Mean Filter", self.apply_mean),
@@ -318,18 +375,18 @@ class DIPTool(ctk.CTk):
             ctk.CTkButton(
                 parent, text=text,
                 command=cmd,
-                fg_color="#2a4f5f", hover_color="#3a6f7f",
-                height=28, font=ctk.CTkFont(size=9),
-                corner_radius=4
-            ).pack(fill="x", padx=12, pady=2)
+                fg_color=self.ui["panel_alt"], hover_color=self.ui["accent"],
+                height=32, font=ctk.CTkFont(family=self.ui["font"], size=9),
+                corner_radius=8, border_width=1, border_color=self.ui["border"]
+            ).pack(fill="x", padx=10, pady=4)
 
         # Edge detection / Enhancement
         edge_label = ctk.CTkLabel(
             parent, text="Sharpening & Edges",
-            font=ctk.CTkFont(size=9, weight="bold"),
-            text_color="#ccccff"
+            font=ctk.CTkFont(family=self.ui["font"], size=9, weight="bold"),
+            text_color=self.ui["muted"]
         )
-        edge_label.pack(anchor="w", padx=14, pady=(8, 2))
+        edge_label.pack(anchor="w", padx=12, pady=(10, 2))
         
         edge_btns = [
             ("Sharpen", self.apply_laplacian_sharp),
@@ -340,44 +397,27 @@ class DIPTool(ctk.CTk):
             ctk.CTkButton(
                 parent, text=text,
                 command=cmd,
-                fg_color="#2a4f5f", hover_color="#3a6f7f",
-                height=28, font=ctk.CTkFont(size=9),
-                corner_radius=4
-            ).pack(fill="x", padx=12, pady=2)
+                fg_color=self.ui["panel_alt"], hover_color=self.ui["accent"],
+                height=32, font=ctk.CTkFont(family=self.ui["font"], size=9),
+                corner_radius=8, border_width=1, border_color=self.ui["border"]
+            ).pack(fill="x", padx=10, pady=4)
 
     def _build_advanced_section(self, parent, color):
         """Advanced tools"""
         btns_config = [
-            ("🎯 Draw ROI (Select Area)", self.start_roi_drawing, "#5f3f5f"),
-            ("🤖 Remove Background (AI)", self.remove_bg_ai, "#6f4f7f"),
-            ("📊 Show Histogram", self.show_histogram, "#5f4f6f"),
+            ("Trace Object (Freehand)", self.start_roi_drawing, self.ui["panel_alt"]),
+            ("Remove Background", self.remove_bg_ai, self.ui["panel_alt"]),
+            ("Show Histogram", self.show_histogram, self.ui["panel_alt"]),
         ]
         
         for text, cmd, fg_color in btns_config:
             ctk.CTkButton(
                 parent, text=text,
                 command=cmd,
-                fg_color=fg_color, hover_color=self._lighten_color(fg_color),
-                height=36, font=ctk.CTkFont(size=10, weight="bold"),
-                corner_radius=6
-            ).pack(fill="x", padx=12, pady=4)
-
-    def _lighten_color(self, hex_color):
-        """Lighten a hex color by returning a slightly lighter shade"""
-        # Simple approach: return a brighter version
-        color_map = {
-            "#0066cc": "#0088ff",
-            "#1e5f3f": "#2a8050",
-            "#2a4f5f": "#3a6f7f",
-            "#4f3f5f": "#6f5f7f",
-            "#5f3f5f": "#7f5f7f",
-            "#2a7050": "#3a9060",
-            "#3a8060": "#4aa070",
-            "#4a9070": "#5ab080",
-            "#5f4f6f": "#7f6f8f",
-            "#6f4f7f": "#8f6f9f",
-        }
-        return color_map.get(hex_color, "#00d4ff")
+                fg_color=fg_color, hover_color=self.ui["accent"],
+                height=38, font=ctk.CTkFont(family=self.ui["font"], size=10, weight="bold"),
+                corner_radius=10, border_width=1, border_color=self.ui["border"]
+            ).pack(fill="x", padx=10, pady=5)
 
     # ═══════════════════════════════════════════════
     # MAIN AREA
@@ -386,7 +426,7 @@ class DIPTool(ctk.CTk):
         # Top toolbar
         toolbar = ctk.CTkFrame(
             self.main_area, height=42,
-            fg_color=("#1a1a2e", "#0f0f1a")
+            fg_color=self.ui["panel"]
         )
         toolbar.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
         toolbar.pack_propagate(False)
@@ -394,9 +434,9 @@ class DIPTool(ctk.CTk):
         # Status info
         self.status_label = ctk.CTkLabel(
             toolbar,
-            text="Open an image to begin",
-            font=ctk.CTkFont(size=11),
-            text_color="#888"
+            text="Load an image to begin",
+            font=ctk.CTkFont(family=self.ui["font"], size=11),
+            text_color=self.ui["muted"]
         )
         self.status_label.pack(side="left", padx=12, pady=4)
 
@@ -407,27 +447,28 @@ class DIPTool(ctk.CTk):
         # View mode buttons
         ctk.CTkLabel(
             toolbar, text="View:",
-            font=ctk.CTkFont(size=10)
+            font=ctk.CTkFont(family=self.ui["font"], size=10),
+            text_color=self.ui["muted"]
         ).pack(side="right", padx=(0, 8))
         
-        for label, val in [("Original", "original"), ("Processed", "processed"), ("Split", "split")]:
+        for label, val in [("Source", "original"), ("Preview", "processed"), ("Split", "split")]:
             ctk.CTkButton(
                 toolbar, text=label, width=90,
                 command=lambda v=val: self.set_view_mode(v),
-                fg_color="#1e3a5f", hover_color="#2a5080",
-                height=28
+                fg_color=self.ui["panel_alt"], hover_color=self.ui["accent"],
+                height=28, border_width=1, border_color=self.ui["border"]
             ).pack(side="right", padx=2, pady=3)
 
         # Main separator
-        sep = ctk.CTkFrame(self.main_area, height=1, fg_color="#333366")
+        sep = ctk.CTkFrame(self.main_area, height=1, fg_color=self.ui["border"])
         sep.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
 
         # Canvas area with labels and buttons
         self.canvas_frame = ctk.CTkFrame(self.main_area, fg_color="transparent")
         self.canvas_frame.grid(row=2, column=0, sticky="nsew", padx=0, pady=0)
         self.canvas_frame.grid_rowconfigure(0, weight=1)
-        self.canvas_frame.grid_columnconfigure(0, weight=1)
-        self.canvas_frame.grid_columnconfigure(1, weight=1)
+        self.canvas_frame.grid_columnconfigure(0, weight=1, uniform="canvas_col")
+        self.canvas_frame.grid_columnconfigure(1, weight=1, uniform="canvas_col")
 
         # Original image section
         self.orig_frame = ctk.CTkFrame(self.canvas_frame, fg_color="transparent")
@@ -438,15 +479,15 @@ class DIPTool(ctk.CTk):
         self.orig_frame.grid_columnconfigure(0, weight=1)
         
         label_orig = ctk.CTkLabel(
-            self.orig_frame, text="Current Output",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#aaa", height=16
+            self.orig_frame, text="Source",
+            font=ctk.CTkFont(family=self.ui["font"], size=10, weight="bold"),
+            text_color=self.ui["text"], height=16
         )
         label_orig.grid(row=0, column=0, sticky="ew", padx=0, pady=2)
         
         self.img_orig = ctk.CTkLabel(
             self.orig_frame, text="Open an image",
-            fg_color=("#0d0d1f", "#050510"), corner_radius=4
+            fg_color=self.ui["panel"], corner_radius=10
         )
         self.img_orig.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
         
@@ -464,15 +505,15 @@ class DIPTool(ctk.CTk):
         self.proc_frame.grid_columnconfigure(0, weight=1)
         
         label_proc = ctk.CTkLabel(
-            self.proc_frame, text="Preview (Editing)",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#00d4ff", height=16
+            self.proc_frame, text="Preview",
+            font=ctk.CTkFont(family=self.ui["font"], size=10, weight="bold"),
+            text_color=self.ui["accent"], height=16
         )
         label_proc.grid(row=0, column=0, sticky="ew", padx=0, pady=2)
         
         self.img_proc = ctk.CTkLabel(
             self.proc_frame, text="",
-            fg_color=("#0d0d1f", "#050510"), corner_radius=4
+            fg_color=self.ui["panel"], corner_radius=10
         )
         self.img_proc.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
 
@@ -484,15 +525,17 @@ class DIPTool(ctk.CTk):
         ctk.CTkButton(
             button_frame, text="Apply Changes",
             command=self.apply_changes,
-            fg_color="#00aa44", hover_color="#00cc55",
-            height=26, font=ctk.CTkFont(size=9, weight="bold")
+            fg_color=self.ui["success"], hover_color=self.ui["success_hover"],
+            height=26, font=ctk.CTkFont(family=self.ui["font"], size=9, weight="bold"),
+            border_width=1, border_color=self.ui["border"]
         ).pack(side="right", padx=2, pady=1)
         
         ctk.CTkButton(
             button_frame, text="Undo",
             command=self.undo_changes,
-            fg_color="#aa4400", hover_color="#cc5500",
-            height=26, font=ctk.CTkFont(size=9, weight="bold")
+            fg_color=self.ui["danger"], hover_color=self.ui["danger_hover"],
+            height=26, font=ctk.CTkFont(family=self.ui["font"], size=9, weight="bold"),
+            border_width=1, border_color=self.ui["border"]
         ).pack(side="right", padx=2, pady=1)
 
     # ═══════════════════════════════════════════════
@@ -634,36 +677,33 @@ class DIPTool(ctk.CTk):
         if self.preview_image is not None and self.preview_image.shape != self.original_image.shape:
             self.preview_image = cv2.resize(self.preview_image, (self.original_image.shape[1], self.original_image.shape[0]))
         
-        # Use window dimensions directly
-        win_w = self.winfo_width()
-        win_h = self.winfo_height()
-        
-        # Account for sidebar (280px) and margins
-        canvas_w = max(600, win_w - 300)
-        canvas_h = max(500, win_h - 100)
-        
-        # Each pane gets half
-        w = (canvas_w - 4) // 2
-        h = canvas_h - 44
+        # Use actual drawable area from canvas container to avoid offsets.
+        self.update_idletasks()
+        canvas_w = max(320, self.canvas_frame.winfo_width() - 8)
+        canvas_h = max(260, self.canvas_frame.winfo_height() - 8)
+        h = max(200, canvas_h - 44)
 
         # Control what displays based on view mode
         if self.display_mode == "split":
             # Split: Left=current output, Right=preview (editing)
+            w = max(180, (canvas_w - 4) // 2)
+            self.orig_frame.grid(row=0, column=0, columnspan=1, sticky="nsew", padx=2, pady=0)
+            self.proc_frame.grid(row=0, column=1, columnspan=1, sticky="nsew", padx=2, pady=0)
             self._show_cv(self.img_orig, self.current_image, w, h)
             self._show_cv(self.img_proc, self.preview_image, w, h)
-            self.orig_frame.grid()
-            self.proc_frame.grid()
         elif self.display_mode == "original":
             # Compare: Left=original (as uploaded), Right=current (edited)
+            w = max(180, (canvas_w - 4) // 2)
+            self.orig_frame.grid(row=0, column=0, columnspan=1, sticky="nsew", padx=2, pady=0)
+            self.proc_frame.grid(row=0, column=1, columnspan=1, sticky="nsew", padx=2, pady=0)
             self._show_cv(self.img_orig, self.original_image, w, h)
             self._show_cv(self.img_proc, self.current_image, w, h)
-            self.orig_frame.grid()
-            self.proc_frame.grid()
         else:  # processed
             # Processed: Show only right pane with preview
-            self._show_cv(self.img_proc, self.preview_image, w, h)
+            w = max(280, canvas_w - 2)
             self.orig_frame.grid_remove()
-            self.proc_frame.grid()
+            self.proc_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=2, pady=0)
+            self._show_cv(self.img_proc, self.preview_image, w, h)
 
     def _show_cv(self, label_widget, bgr_img, max_w, max_h, side=""):
         """Convert BGR to PIL and display on CTkLabel - maintain aspect ratio"""
@@ -711,22 +751,40 @@ class DIPTool(ctk.CTk):
     # ═══════════════════════════════════════════════
     # ADJUSTMENTS (Real-time Preview)
     # ═══════════════════════════════════════════════
+    def _schedule_adjustment(self, kind, delay_ms=60):
+        """Debounce slider updates so dragging feels smoother."""
+        self.pending_adjustment = kind
+        if self.adjust_timer is not None:
+            self.after_cancel(self.adjust_timer)
+            self.adjust_timer = None
+        self.adjust_timer = self.after(delay_ms, self._run_pending_adjustment)
+
+    def _run_pending_adjustment(self):
+        self.adjust_timer = None
+        kind = self.pending_adjustment
+        self.pending_adjustment = None
+
+        if kind == "bc":
+            self.apply_brightness_contrast()
+        elif kind == "gamma":
+            self.apply_gamma()
+
     def _on_brightness_change(self, val):
         b = int(float(val))
         self.bright_label.configure(text=f"{b:+d}")
-        self.apply_brightness_contrast()
+        self._schedule_adjustment("bc")
 
     def _on_contrast_change(self, val):
         c = float(val)
         self.contrast_label.configure(text=f"{c:.2f}")
-        self.apply_brightness_contrast()
+        self._schedule_adjustment("bc")
 
     def _on_gamma_change(self, val):
         gamma_val = float(val)
         self.gamma_label.configure(
             text=f"{gamma_val:.2f}" + ("←Darker" if gamma_val < 1 else "→Brighter" if gamma_val > 1 else "")
         )
-        self.apply_gamma()
+        self._schedule_adjustment("gamma")
 
     def apply_brightness_contrast(self):
         """Apply brightness and contrast in real-time"""
@@ -845,20 +903,20 @@ class DIPTool(ctk.CTk):
         
         messagebox.showinfo(
             "Select Object",
-            "Click and drag to draw a rectangle around the object you want to edit.\n\n"
-            "The app will try to detect the object inside that box and build a mask for future edits.\n\n"
-            "Close this dialog then click on the image to start."
+            "Hold left mouse button and trace around the object boundary.\n\n"
+            "When you release the mouse, the traced shape becomes the editable ROI mask.\n\n"
+            "Tip: draw one continuous closed contour around the character."
         )
         
         # Create a temporary window for ROI drawing
         self._show_roi_window()
 
     def _show_roi_window(self):
-        """Display image in a window for object-based ROI selection"""
+        """Display image in a window for freehand ROI tracing"""
         from tkinter import Canvas
         
         roi_win = ctk.CTkToplevel(self)
-        roi_win.title("Select Object - Click and Drag Around the Object")
+        roi_win.title("Trace Object - Hold Mouse and Draw Around Object")
         roi_win.geometry("1000x650")
         
         # Convert image for display
@@ -888,104 +946,213 @@ class DIPTool(ctk.CTk):
         
         # Drawing state
         drawing = [False]
-        start_pos = [None]
-        rect_id = [None]
-        
+        trace_points = [[]]
+        line_ids = [[]]
+        pending_lasso_mask = [None]
+        pending_bbox = [None]
+
+        def _clamp_display_point(x, y):
+            cx = max(0, min(int(x), display_w - 1))
+            cy = max(0, min(int(y), display_h - 1))
+            return cx, cy
+
+        def _clear_trace():
+            for lid in line_ids[0]:
+                canvas.delete(lid)
+            line_ids[0].clear()
+            trace_points[0] = []
+
+        def _reset_pending():
+            pending_lasso_mask[0] = None
+            pending_bbox[0] = None
+            apply_btn.configure(state="disabled")
+            info.configure(text="Hold left mouse and trace around the object boundary, then release to preview")
+
         def on_mouse_down(event):
             drawing[0] = True
-            start_pos[0] = (event.x, event.y)
-            # Clear previous rect
-            if rect_id[0]:
-                canvas.delete(rect_id[0])
-                rect_id[0] = None
-        
-        def on_mouse_drag(event):
-            if not drawing[0] or start_pos[0] is None:
-                return
-            
-            # Clear previous rect
-            if rect_id[0]:
-                canvas.delete(rect_id[0])
-            
-            # Draw new rect preview
-            x1, y1 = start_pos[0]
-            x2, y2 = event.x, event.y
-            rect_id[0] = canvas.create_rectangle(
-                x1, y1, x2, y2, 
-                outline="lime", width=2
-            )
-        
-        def on_mouse_up(event):
-            if not drawing[0]:
-                return
-            
-            drawing[0] = False
-            end_pos = (event.x, event.y)
-            
-            if start_pos[0] is None:
-                return
-            
-            # Get coordinates in display space
-            x1_disp = min(start_pos[0][0], end_pos[0])
-            x2_disp = max(start_pos[0][0], end_pos[0])
-            y1_disp = min(start_pos[0][1], end_pos[1])
-            y2_disp = max(start_pos[0][1], end_pos[1])
-            
-            # Minimum size check
-            if (x2_disp - x1_disp) < 10 or (y2_disp - y1_disp) < 10:
-                messagebox.showwarning("Too small", "ROI area too small. Please draw a larger area.")
-                roi_win.destroy()
-                return
-            
-            # Convert to original image coordinates
-            if scale > 0:
-                x1 = int(x1_disp / scale)
-                x2 = int(x2_disp / scale)
-                y1 = int(y1_disp / scale)
-                y2 = int(y2_disp / scale)
-            else:
-                x1, x2, y1, y2 = 0, orig_w, 0, orig_h
-            
-            # Clamp to bounds
-            x1 = max(0, min(x1, orig_w - 1))
-            x2 = max(x1 + 1, min(x2, orig_w))
-            y1 = max(0, min(y1, orig_h - 1))
-            y2 = max(y1 + 1, min(y2, orig_h))
-            
-            # Segment the object inside the rectangle.
-            try:
-                mask = segment_object_from_rect(self.current_image, (x1, y1, x2, y2))
-            except Exception as exc:
-                use_rect = messagebox.askyesno(
-                    "Segmentation failed",
-                    f"Could not isolate the object inside the selected area.\n\n{exc}\n\nUse the full rectangle as ROI instead?"
-                )
-                if not use_rect:
-                    return
+            _clear_trace()
+            trace_points[0].append(_clamp_display_point(event.x, event.y))
+            _reset_pending()
 
-                mask = np.zeros((orig_h, orig_w), dtype=np.uint8)
-                mask[y1:y2, x1:x2] = 255
-            
-            self.roi_mask = mask
-            mask_area = int(cv2.countNonZero(mask))
-            self.status_label.configure(
-                text=f"Object selected: ({x1},{y1}) to ({x2},{y2}) - Mask area: {mask_area}px²"
+        def on_mouse_drag(event):
+            if not drawing[0] or not trace_points[0]:
+                return
+
+            x, y = _clamp_display_point(event.x, event.y)
+            px, py = trace_points[0][-1]
+
+            # Ignore tiny moves to reduce noisy edges.
+            if abs(x - px) + abs(y - py) < 2:
+                return
+
+            trace_points[0].append((x, y))
+            line_ids[0].append(
+                canvas.create_line(px, py, x, y, fill="#46d18b", width=2, smooth=True)
             )
-            
+
+        def on_mouse_up(event):
+            if not drawing[0] or not trace_points[0]:
+                return
+
+            drawing[0] = False
+            end_point = _clamp_display_point(event.x, event.y)
+            if trace_points[0][-1] != end_point:
+                trace_points[0].append(end_point)
+
+            if len(trace_points[0]) < 12:
+                messagebox.showwarning("Too short", "Please trace a longer contour around the object.")
+                return
+
+            sx, sy = trace_points[0][0]
+            ex, ey = trace_points[0][-1]
+            line_ids[0].append(canvas.create_line(ex, ey, sx, sy, fill="#46d18b", width=2, smooth=True))
+
+            pts_disp = np.array(trace_points[0], dtype=np.float32)
+            if scale > 0:
+                pts_orig = np.round(pts_disp / scale).astype(np.int32)
+            else:
+                pts_orig = pts_disp.astype(np.int32)
+
+            pts_orig[:, 0] = np.clip(pts_orig[:, 0], 0, orig_w - 1)
+            pts_orig[:, 1] = np.clip(pts_orig[:, 1], 0, orig_h - 1)
+
+            contour_area = abs(cv2.contourArea(pts_orig))
+            if contour_area < 120:
+                messagebox.showwarning("Too small", "Traced area is too small. Please draw around the full object.")
+                return
+
+            traced_mask = np.zeros((orig_h, orig_w), dtype=np.uint8)
+            cv2.fillPoly(traced_mask, [pts_orig], 255)
+
+            x1, x2 = int(pts_orig[:, 0].min()), int(pts_orig[:, 0].max())
+            y1, y2 = int(pts_orig[:, 1].min()), int(pts_orig[:, 1].max())
+            pending_lasso_mask[0] = traced_mask
+            pending_bbox[0] = (x1, y1, x2, y2)
+            apply_btn.configure(state="normal")
+            info.configure(text="Contour ready. Click Apply Selection to extract object, or draw again to replace.")
+
+        def apply_selection():
+            if pending_lasso_mask[0] is None or pending_bbox[0] is None:
+                messagebox.showwarning("No selection", "Please draw a contour first.")
+                return
+
+            apply_btn.configure(state="disabled")
+            info.configure(text="Extracting object... please wait")
+            roi_win.update_idletasks()
+
+            try:
+                mask = segment_object_from_lasso(self.current_image, pending_lasso_mask[0], iterations=4, tighten_iterations=1)
+            except Exception as exc:
+                apply_btn.configure(state="normal")
+                info.configure(text="Segmentation failed. Draw tighter contour and click Apply again.")
+                messagebox.showwarning(
+                    "Segmentation warning",
+                    f"Could not refine object inside traced contour.\n\n{exc}\n\nPlease redraw the contour a bit tighter around the object."
+                )
+                return
+
+            # If result is too similar to whole traced region, fallback to rectangle object extraction.
+            used_rect_fallback = False
+            lasso_area = int(cv2.countNonZero(pending_lasso_mask[0]))
+            mask_area = int(cv2.countNonZero(mask))
+            if lasso_area > 0 and (mask_area / lasso_area) > 0.82:
+                try:
+                    rect_mask = segment_object_from_rect(
+                        self.current_image,
+                        pending_bbox[0],
+                        iterations=6,
+                        border_margin_ratio=0.1,
+                        tighten_iterations=1,
+                    )
+                    safe_lasso = cv2.erode(
+                        pending_lasso_mask[0],
+                        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+                        iterations=1,
+                    )
+                    if cv2.countNonZero(safe_lasso) == 0:
+                        safe_lasso = pending_lasso_mask[0]
+
+                    merged = cv2.bitwise_and(rect_mask, safe_lasso)
+                    if cv2.countNonZero(merged) > 0:
+                        mask = merged
+                        used_rect_fallback = True
+                except Exception:
+                    pass
+
+            ys, xs = np.where(mask > 0)
+            if len(xs) == 0 or len(ys) == 0:
+                apply_btn.configure(state="normal")
+                info.configure(text="No object found. Please redraw contour.")
+                messagebox.showwarning("Empty mask", "No valid ROI found. Please redraw the contour.")
+                return
+
+            self.roi_mask = mask
+            x1, x2 = int(xs.min()), int(xs.max())
+            y1, y2 = int(ys.min()), int(ys.max())
+            mask_area = int(cv2.countNonZero(self.roi_mask))
+            self.status_label.configure(
+                text=(
+                    f"Object selected: ({x1},{y1}) to ({x2},{y2}) - Mask area: {mask_area}px²"
+                    + (" | mode: object-in-box" if used_rect_fallback else " | mode: lasso-refine")
+                )
+            )
+
             roi_win.destroy()
-            messagebox.showinfo("Success", f"Object selected!\n\nFilters will be applied to the detected object only.")
+            messagebox.showinfo("Success", "ROI applied. Filters will be applied only on the selected object.")
+
+        def redraw_selection():
+            _clear_trace()
+            _reset_pending()
         
         # Bind events
         canvas.bind("<Button-1>", on_mouse_down)
         canvas.bind("<B1-Motion>", on_mouse_drag)
         canvas.bind("<ButtonRelease-1>", on_mouse_up)
+
+        controls = ctk.CTkFrame(roi_win, fg_color="transparent")
+        controls.pack(pady=(2, 6))
+
+        ctk.CTkButton(
+            controls,
+            text="Redraw",
+            command=redraw_selection,
+            fg_color=self.ui["panel_alt"],
+            hover_color=self.ui["accent"],
+            border_width=1,
+            border_color=self.ui["border"],
+            width=120
+        ).pack(side="left", padx=6)
+
+        apply_btn = ctk.CTkButton(
+            controls,
+            text="Apply Selection",
+            command=apply_selection,
+            state="disabled",
+            fg_color=self.ui["success"],
+            hover_color=self.ui["success_hover"],
+            border_width=1,
+            border_color=self.ui["border"],
+            width=140
+        )
+        apply_btn.pack(side="left", padx=6)
+
+        ctk.CTkButton(
+            controls,
+            text="Cancel",
+            command=roi_win.destroy,
+            fg_color=self.ui["danger"],
+            hover_color=self.ui["danger_hover"],
+            border_width=1,
+            border_color=self.ui["border"],
+            width=100
+        ).pack(side="left", padx=6)
         
         # Instructions
         info = ctk.CTkLabel(
             roi_win,
-            text="Click and drag to draw a rectangle around the object you want to edit",
-            font=ctk.CTkFont(size=10),
-            text_color="#888"
+            text="Hold left mouse and trace around the object boundary, then release to preview",
+            font=ctk.CTkFont(family=self.ui["font"], size=10),
+            text_color=self.ui["muted"]
         )
         info.pack(pady=5)
 
@@ -1022,10 +1189,10 @@ class DIPTool(ctk.CTk):
         win = ctk.CTkToplevel(self)
         win.title("Histogram Comparison")
         win.geometry("1000x450")
-        win.configure(fg_color="#0a0a1a")
+        win.configure(fg_color=self.ui["main"])
         
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4), facecolor="#0a0a1a")
-        colors_bgr = ['#3399ff', '#00cc66', '#ff4444']
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4), facecolor=self.ui["main"])
+        colors_bgr = [self.ui["accent"], self.ui["success"], self.ui["danger"]]
         labels = ['Blue', 'Green', 'Red']
         
         for ax, img, title in zip(
@@ -1033,21 +1200,21 @@ class DIPTool(ctk.CTk):
             [self.original_image, self.current_image],
             ["Original", "Current"]
         ):
-            ax.set_facecolor("#0d0d1f")
-            ax.set_title(title, color="#00d4ff", fontsize=13, weight="bold")
-            ax.tick_params(colors="#888")
+            ax.set_facecolor(self.ui["panel"])
+            ax.set_title(title, color=self.ui["accent"], fontsize=13, weight="bold")
+            ax.tick_params(colors=self.ui["muted"])
             
             for spine in ax.spines.values():
-                spine.set_edgecolor("#333")
+                spine.set_edgecolor(self.ui["border"])
             
             if len(img.shape) == 2:
                 hist = cv2.calcHist([img], [0], None, [256], [0, 256])
-                ax.plot(hist, color="#00d4ff", linewidth=1.5)
+                ax.plot(hist, color=self.ui["accent"], linewidth=1.5)
             elif img.shape[2] == 3:
                 for i, (c, lbl) in enumerate(zip(colors_bgr, labels)):
                     hist = cv2.calcHist([img], [i], None, [256], [0, 256])
                     ax.plot(hist, color=c, linewidth=1.5, label=lbl, alpha=0.85)
-                ax.legend(facecolor="#111", labelcolor="white", fontsize=9)
+                ax.legend(facecolor=self.ui["panel"], labelcolor="white", fontsize=9)
             
             ax.set_xlim([0, 256])
         
