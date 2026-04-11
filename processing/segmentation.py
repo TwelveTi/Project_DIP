@@ -198,6 +198,98 @@ def _auto_tighten_against_lasso_border(mask, border_ring, max_steps=2):
     return work
 
 
+def _edge_guided_refine_lasso_object(image, lasso_bin, seed_mask, candidate_mask, overexposure_score=0.0):
+    """Use strong edges as barriers and keep only edge-connected foreground from seed regions."""
+    if candidate_mask is None or cv2.countNonZero(candidate_mask) == 0:
+        return candidate_mask
+    if seed_mask is None or cv2.countNonZero(seed_mask) == 0:
+        return candidate_mask
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    low = 45 if overexposure_score > 0.12 else 55
+    high = 120 if overexposure_score > 0.12 else 150
+    edges = cv2.Canny(blur, low, high)
+    edges = cv2.dilate(edges, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
+
+    walkable = cv2.bitwise_and(lasso_bin, cv2.bitwise_not(edges))
+    walkable = cv2.morphologyEx(
+        walkable,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=1,
+    )
+
+    if cv2.countNonZero(walkable) == 0:
+        return candidate_mask
+
+    cc_count, labels = cv2.connectedComponents(walkable)
+    if cc_count <= 1:
+        return candidate_mask
+
+    seed_labels = np.unique(labels[(seed_mask > 0) & (walkable > 0)])
+    seed_labels = seed_labels[seed_labels > 0]
+    if seed_labels.size == 0:
+        return candidate_mask
+
+    connected_seed_region = np.isin(labels, seed_labels)
+    edge_refined = np.where(connected_seed_region, 255, 0).astype(np.uint8)
+    edge_refined = cv2.bitwise_and(edge_refined, lasso_bin)
+
+    merged = cv2.bitwise_and(candidate_mask, edge_refined)
+    if cv2.countNonZero(merged) < 120:
+        # If intersection is too strict, keep only the edge-connected region.
+        merged = edge_refined
+
+    if cv2.countNonZero(merged) == 0:
+        return candidate_mask
+
+    return merged
+
+
+def _edge_contour_mask(image, lasso_bin, seed_point):
+    """Extract a closed edge contour inside the lasso that contains the seed point."""
+    if image is None or cv2.countNonZero(lasso_bin) == 0:
+        return None
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    median = float(np.median(blur))
+    lower = int(max(10, 0.66 * median))
+    upper = int(min(220, 1.33 * median))
+    edges = cv2.Canny(blur, lower, upper)
+    edges = cv2.dilate(edges, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
+
+    edges = cv2.bitwise_and(edges, lasso_bin)
+    if cv2.countNonZero(edges) == 0:
+        return None
+
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    best = None
+    best_area = 0.0
+    sx, sy = seed_point
+    for cnt in contours:
+        if len(cnt) < 6:
+            continue
+        if cv2.pointPolygonTest(cnt, (float(sx), float(sy)), False) < 0:
+            continue
+        area = abs(cv2.contourArea(cnt))
+        if area > best_area:
+            best_area = area
+            best = cnt
+
+    if best is None or best_area < 80:
+        return None
+
+    mask = np.zeros_like(lasso_bin)
+    cv2.drawContours(mask, [best], -1, 255, thickness=-1)
+    return mask
+
+
 def remove_background_selfie(image):
     """
     Remove background using MediaPipe Selfie Segmentation.
@@ -421,7 +513,7 @@ def segment_object_from_rect(image, rect, iterations=6, border_margin_ratio=0.08
     return binary_mask
 
 
-def segment_object_from_lasso(image, lasso_mask, iterations=3, tighten_iterations=0):
+def segment_object_from_lasso(image, lasso_mask, iterations=3, tighten_iterations=0, edge_adjust=0):
     """
     Segment object inside a user-drawn freehand contour.
 
@@ -449,46 +541,56 @@ def segment_object_from_lasso(image, lasso_mask, iterations=3, tighten_iteration
 
     work_img, overexposure_score = _prepare_segmentation_image(image)
 
-    mask = np.full((h, w), cv2.GC_BGD, dtype=np.uint8)
-    # Avoid forcing wide lasso interiors to foreground.
-    # Start as probable background and let seeds promote true object regions.
-    mask[lasso_bin > 0] = cv2.GC_PR_BGD
+    # Build robust trimap from lasso geometry.
+    area = max(1, int(cv2.countNonZero(lasso_bin)))
+    approx_radius = max(6, int(np.sqrt(area / np.pi)))
 
-    # Build trimap from the traced contour:
-    # - border ring near lasso edge: probable background
-    # - center core: sure foreground
-    ring_size = 13 if overexposure_score > 0.12 else 9
-    ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ring_size, ring_size))
-    inner_lasso = cv2.erode(lasso_bin, ring_kernel, iterations=1)
-    border_ring = cv2.subtract(lasso_bin, inner_lasso)
-    mask[border_ring > 0] = cv2.GC_BGD
+    # Keep the border ring slimmer so tight lassos do not clip real foreground.
+    border_w = max(3, int(0.06 * approx_radius))
+    core_w = max(6, int(0.16 * approx_radius))
+    border_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * border_w + 1, 2 * border_w + 1))
+    core_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * core_w + 1, 2 * core_w + 1))
 
-    # Build distance-based foreground zones so segmentation is less sensitive
-    # to how loosely the contour was drawn.
+    inner_lasso = cv2.erode(lasso_bin, border_kernel, iterations=1)
+    if cv2.countNonZero(inner_lasso) == 0:
+        inner_lasso = lasso_bin.copy()
+
+    # Center seed: pick the most central point in the lasso (max distance to border).
     dist = cv2.distanceTransform(inner_lasso, cv2.DIST_L2, 5)
     max_dist = float(dist.max())
     if max_dist > 0:
-        probable_fg = np.where(dist >= 0.20 * max_dist, 255, 0).astype(np.uint8)
-        sure_fg = np.where(dist >= 0.45 * max_dist, 255, 0).astype(np.uint8)
+        cy, cx = np.unravel_index(np.argmax(dist), dist.shape)
     else:
-        probable_fg = np.zeros_like(lasso_bin)
-        sure_fg = np.zeros_like(lasso_bin)
+        cy, cx = np.array(inner_lasso.shape) // 2
 
-    if cv2.countNonZero(probable_fg) > 0:
-        mask[probable_fg > 0] = cv2.GC_PR_FGD
-
+    sure_fg = cv2.erode(inner_lasso, core_kernel, iterations=1)
     if cv2.countNonZero(sure_fg) == 0:
-        core_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
-        sure_fg = cv2.erode(inner_lasso, core_kernel, iterations=1)
+        sure_fg = cv2.erode(inner_lasso, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)), iterations=1)
     if cv2.countNonZero(sure_fg) == 0:
-        # Fallback for very small contour.
         sure_fg = cv2.erode(lasso_bin, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)), iterations=1)
 
+    # Inject a compact center seed so the main subject is kept.
+    if max_dist > 0:
+        seed_r = max(6, int(max_dist * 0.25))
+        seed_mask = np.zeros_like(lasso_bin)
+        cv2.circle(seed_mask, (int(cx), int(cy)), seed_r, 255, -1)
+        sure_fg = cv2.bitwise_or(sure_fg, seed_mask)
+
+    border_ring = cv2.subtract(lasso_bin, inner_lasso)
+
+    gc_mask = np.full((h, w), cv2.GC_BGD, dtype=np.uint8)
+    gc_mask[lasso_bin > 0] = cv2.GC_PR_BGD
+    gc_mask[inner_lasso > 0] = cv2.GC_PR_FGD
+    # Treat lasso border as probable background, not sure background.
+    gc_mask[border_ring > 0] = cv2.GC_PR_BGD
+    gc_mask[sure_fg > 0] = cv2.GC_FGD
+
+    # Color-contrast seed helps when the lasso is drawn loosely around many objects.
     color_seed = _foreground_seed_from_border_contrast(work_img, border_ring, inner_lasso)
     if cv2.countNonZero(color_seed) > 0:
-        mask[color_seed > 0] = cv2.GC_PR_FGD
+        gc_mask[color_seed > 0] = cv2.GC_PR_FGD
         sure_fg = cv2.bitwise_or(sure_fg, color_seed)
-    mask[sure_fg > 0] = cv2.GC_FGD
+        gc_mask[sure_fg > 0] = cv2.GC_FGD
 
     x, y, rw, rh = cv2.boundingRect(lasso_bin)
     bgd_model = np.zeros((1, 65), np.float64)
@@ -497,135 +599,146 @@ def segment_object_from_lasso(image, lasso_mask, iterations=3, tighten_iteration
     try:
         cv2.grabCut(
             work_img,
-            mask,
+            gc_mask,
             (x, y, rw, rh),
             bgd_model,
             fgd_model,
-            iterCount=max(1, int(iterations) + (2 if overexposure_score > 0.12 else 0)),
+            iterCount=max(2, int(iterations) + (2 if overexposure_score > 0.12 else 0)),
             mode=cv2.GC_INIT_WITH_MASK,
         )
     except cv2.error as exc:
         raise ValueError(f"GrabCut failed: {exc}") from exc
 
     binary_mask = np.where(
-        (mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD),
+        (gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD),
         255,
         0,
     ).astype(np.uint8)
 
-    # Watershed refinement tends to respect strong image boundaries better
-    # for cartoon/illustration edges.
-    ws_img = cv2.GaussianBlur(work_img, (5, 5), 0)
-    markers = np.zeros((h, w), dtype=np.int32)
-    markers[lasso_bin == 0] = 1
-    markers[border_ring > 0] = 1
-    markers[sure_fg > 0] = 2
-    markers = cv2.watershed(ws_img, markers)
-    ws_mask = np.where(markers == 2, 255, 0).astype(np.uint8)
-
-    # Intersect both estimations for a tighter contour.
-    if cv2.countNonZero(ws_mask) > 0:
-        merged = cv2.bitwise_and(binary_mask, ws_mask)
-        if cv2.countNonZero(merged) > 0:
-            binary_mask = merged
-
-    # Keep result inside traced boundary while excluding the traced border itself.
-    constraint_size = 7 if overexposure_score > 0.12 else 5
+    # Keep only the interior of the lasso (exclude edge ring where leakage often happens).
+    # Use minimal erosion to avoid clipping thin features like hair and ears.
+    constraint_kernel_size = 3 if overexposure_score > 0.12 else 2
     constraint_lasso = cv2.erode(
         lasso_bin,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (constraint_size, constraint_size)),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (constraint_kernel_size, constraint_kernel_size)),
         iterations=1,
     )
-    if cv2.countNonZero(constraint_lasso) == 0:
+    if cv2.countNonZero(constraint_lasso) == 0 or cv2.countNonZero(constraint_lasso) < 0.60 * cv2.countNonZero(lasso_bin):
         constraint_lasso = lasso_bin
 
-    binary_mask[border_ring > 0] = 0
     binary_mask = cv2.bitwise_and(binary_mask, constraint_lasso)
 
-    if overexposure_score > 0.12:
-        area_ratio = cv2.countNonZero(binary_mask) / max(1, cv2.countNonZero(lasso_bin))
-        adj_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        if area_ratio > 0.72:
-            binary_mask = cv2.erode(binary_mask, adj_kernel, iterations=1)
-        elif area_ratio < 0.14:
-            binary_mask = cv2.dilate(binary_mask, adj_kernel, iterations=1)
-            binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, adj_kernel, iterations=1)
+    # Edge-guided refinement keeps regions connected to strong edges near the seed.
+    edge_refined = _edge_guided_refine_lasso_object(
+        work_img,
+        constraint_lasso,
+        sure_fg,
+        binary_mask,
+        overexposure_score=overexposure_score,
+    )
+    if edge_refined is not None and cv2.countNonZero(edge_refined) > 0:
+        binary_mask = edge_refined
 
-    post_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, post_kernel, iterations=1)
-    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, post_kernel, iterations=2)
+    # Second GrabCut pass to detach leaked background while preserving thin limbs.
+    binary_mask = _second_pass_grabcut_refine(work_img, constraint_lasso, binary_mask, iterations=2)
 
-    if tighten_iterations > 0:
-        binary_mask = cv2.erode(binary_mask, post_kernel, iterations=int(tighten_iterations))
+    edge_mask = _edge_contour_mask(work_img, constraint_lasso, (int(cx), int(cy)))
+    if edge_mask is not None:
+        edge_area = cv2.countNonZero(edge_mask)
+        base_area = max(1, cv2.countNonZero(binary_mask))
+        if 0.35 <= (edge_area / base_area) <= 1.35:
+            binary_mask = edge_mask
 
-    # Prefer the object component that is central and not connected to traced border.
-    border_proximity = cv2.dilate(
+    # Remove regions attached to lasso border unless they strongly overlap center seed.
+    border_touch_zone = cv2.dilate(
         border_ring,
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)),
         iterations=1,
     )
 
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
-    if num_labels > 1:
-        seed_m = cv2.moments(sure_fg)
-        if seed_m["m00"] > 0:
-            seed_cx = seed_m["m10"] / seed_m["m00"]
-            seed_cy = seed_m["m01"] / seed_m["m00"]
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
+    if n_labels > 1:
+        sm = cv2.moments(sure_fg)
+        if sm["m00"] > 0:
+            seed_cx = sm["m10"] / sm["m00"]
+            seed_cy = sm["m01"] / sm["m00"]
         else:
-            seed_cx = w / 2.0
-            seed_cy = h / 2.0
+            lm = cv2.moments(lasso_bin)
+            seed_cx = (lm["m10"] / lm["m00"]) if lm["m00"] > 0 else (w / 2.0)
+            seed_cy = (lm["m01"] / lm["m00"]) if lm["m00"] > 0 else (h / 2.0)
 
-        candidates = []
-        for label_id in range(1, num_labels):
-            area = int(stats[label_id, cv2.CC_STAT_AREA])
-            if area < 80:
+        best_label = -1
+        best_score = None
+
+        for label_id in range(1, n_labels):
+            comp = (labels == label_id)
+            area_px = int(stats[label_id, cv2.CC_STAT_AREA])
+            if area_px < 120:
                 continue
 
-            comp_mask = (labels == label_id)
-            overlap = int(np.count_nonzero(comp_mask & (sure_fg > 0)))
-            color_overlap = int(np.count_nonzero(comp_mask & (color_seed > 0))) if cv2.countNonZero(color_seed) > 0 else 0
-            touch_pixels = int(np.count_nonzero(comp_mask & (border_proximity > 0)))
-            touches_border = touch_pixels > 0
+            overlap_seed = int(np.count_nonzero(comp & (sure_fg > 0)))
+            if overlap_seed == 0:
+                continue
 
-            comp_m = cv2.moments(comp_mask.astype(np.uint8))
+            border_touch = int(np.count_nonzero(comp & (border_touch_zone > 0)))
+            touch_ratio = border_touch / float(area_px)
+            comp_m = cv2.moments(comp.astype(np.uint8))
             if comp_m["m00"] > 0:
-                comp_cx = comp_m["m10"] / comp_m["m00"]
-                comp_cy = comp_m["m01"] / comp_m["m00"]
-                center_dist = float(np.hypot(comp_cx - seed_cx, comp_cy - seed_cy))
+                cx = comp_m["m10"] / comp_m["m00"]
+                cy = comp_m["m01"] / comp_m["m00"]
+                center_dist = float(np.hypot(cx - seed_cx, cy - seed_cy))
             else:
                 center_dist = 1e9
 
-            # Priority: avoid border-connected regions, then maximize seed overlap and area.
-            score = (not touches_border, overlap, color_overlap, -center_dist, area, -touch_pixels)
-            candidates.append((score, label_id))
+            # High overlap with center seed and low border attachment are preferred.
+            score = (overlap_seed, -touch_ratio, area_px, -center_dist)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_label = label_id
 
-        if candidates:
-            best_label = max(candidates, key=lambda t: t[0])[1]
+        if best_label > 0:
             binary_mask = np.where(labels == best_label, 255, 0).astype(np.uint8)
+        else:
+            # Hard fallback: keep component that contains the center seed.
+            seed_label = labels[int(cy), int(cx)] if 0 <= cy < h and 0 <= cx < w else 0
+            if seed_label > 0:
+                binary_mask = np.where(labels == seed_label, 255, 0).astype(np.uint8)
 
-    # One more refinement pass to peel off attached background chunks.
-    binary_mask = _second_pass_grabcut_refine(
-        work_img,
-        constraint_lasso,
-        binary_mask,
-        iterations=2 if overexposure_score <= 0.12 else 3,
-    )
-
+    # Final contour tightening for cleaner object boundary.
+    # Skip morphological opening to preserve thin features like hair and ears.
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, close_kernel, iterations=2)
+    
+    # Trim halo with more tolerance to keep all boundary features.
     binary_mask = _trim_mask_halo(
         work_img,
         binary_mask,
         bg_hint_mask=border_ring,
-        delta_thresh=20.0 if overexposure_score <= 0.12 else 24.0,
+        delta_thresh=32.0 if overexposure_score <= 0.12 else 36.0,
     )
+    
+    # Auto-dilate if mask is sparse (lost too many thin features).
+    initial_area = cv2.countNonZero(binary_mask)
+    lasso_area = cv2.countNonZero(constraint_lasso)
+    if initial_area > 0 and lasso_area > 0:
+        density = initial_area / float(lasso_area)
+        if density < 0.45:
+            dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            binary_mask = cv2.dilate(binary_mask, dilate_kernel, iterations=1)
 
-    binary_mask = _auto_tighten_against_lasso_border(
-        binary_mask,
-        border_ring,
-        max_steps=3 if overexposure_score <= 0.12 else 2,
-    )
+    if tighten_iterations > 0:
+        binary_mask = cv2.erode(binary_mask, close_kernel, iterations=int(tighten_iterations))
 
-    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, post_kernel, iterations=1)
-    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, post_kernel, iterations=1)
+    # Apply user-controlled edge adjustment (expand or contract boundary).
+    if edge_adjust != 0:
+        adjust_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        steps = int(abs(edge_adjust))
+        if edge_adjust > 0:
+            binary_mask = cv2.dilate(binary_mask, adjust_kernel, iterations=steps)
+        else:
+            # Only erode if mask is large enough to preserve features.
+            if cv2.countNonZero(binary_mask) > lasso_area * 0.30:
+                binary_mask = cv2.erode(binary_mask, adjust_kernel, iterations=steps)
 
     if cv2.countNonZero(binary_mask) == 0:
         raise ValueError("No object could be segmented inside the traced contour")

@@ -676,6 +676,9 @@ class DIPTool(ctk.CTk):
         
         if self.preview_image is not None and self.preview_image.shape != self.original_image.shape:
             self.preview_image = cv2.resize(self.preview_image, (self.original_image.shape[1], self.original_image.shape[0]))
+
+        current_view = self._overlay_roi_outline(self.current_image)
+        preview_view = self._overlay_roi_outline(self.preview_image)
         
         # Use actual drawable area from canvas container to avoid offsets.
         self.update_idletasks()
@@ -689,21 +692,42 @@ class DIPTool(ctk.CTk):
             w = max(180, (canvas_w - 4) // 2)
             self.orig_frame.grid(row=0, column=0, columnspan=1, sticky="nsew", padx=2, pady=0)
             self.proc_frame.grid(row=0, column=1, columnspan=1, sticky="nsew", padx=2, pady=0)
-            self._show_cv(self.img_orig, self.current_image, w, h)
-            self._show_cv(self.img_proc, self.preview_image, w, h)
+            self._show_cv(self.img_orig, current_view, w, h)
+            self._show_cv(self.img_proc, preview_view, w, h)
         elif self.display_mode == "original":
             # Compare: Left=original (as uploaded), Right=current (edited)
             w = max(180, (canvas_w - 4) // 2)
             self.orig_frame.grid(row=0, column=0, columnspan=1, sticky="nsew", padx=2, pady=0)
             self.proc_frame.grid(row=0, column=1, columnspan=1, sticky="nsew", padx=2, pady=0)
             self._show_cv(self.img_orig, self.original_image, w, h)
-            self._show_cv(self.img_proc, self.current_image, w, h)
+            self._show_cv(self.img_proc, current_view, w, h)
         else:  # processed
             # Processed: Show only right pane with preview
             w = max(280, canvas_w - 2)
             self.orig_frame.grid_remove()
             self.proc_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=2, pady=0)
-            self._show_cv(self.img_proc, self.preview_image, w, h)
+            self._show_cv(self.img_proc, preview_view, w, h)
+
+    def _overlay_roi_outline(self, image):
+        """Render selected ROI contour on top of image for clearer visual feedback."""
+        if image is None or self.roi_mask is None:
+            return image
+
+        if self.roi_mask.shape[:2] != image.shape[:2]:
+            mask = cv2.resize(self.roi_mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
+        else:
+            mask = self.roi_mask
+
+        if cv2.countNonZero(mask) == 0:
+            return image
+
+        outlined = image.copy()
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            # High-contrast dual stroke is easier to read than yellow on bright cartoons.
+            cv2.drawContours(outlined, contours, -1, (255, 255, 255), 5)
+            cv2.drawContours(outlined, contours, -1, (0, 0, 255), 3)
+        return outlined
 
     def _show_cv(self, label_widget, bgr_img, max_w, max_h, side=""):
         """Convert BGR to PIL and display on CTkLabel - maintain aspect ratio"""
@@ -900,12 +924,9 @@ class DIPTool(ctk.CTk):
                 self.roi_mask = None
             else:
                 return
-        
-        messagebox.showinfo(
-            "Select Object",
-            "Hold left mouse button and trace around the object boundary.\n\n"
-            "When you release the mouse, the traced shape becomes the editable ROI mask.\n\n"
-            "Tip: draw one continuous closed contour around the character."
+
+        self.status_label.configure(
+            text="ROI mode: hold left mouse and trace around the object boundary"
         )
         
         # Create a temporary window for ROI drawing
@@ -918,6 +939,14 @@ class DIPTool(ctk.CTk):
         roi_win = ctk.CTkToplevel(self)
         roi_win.title("Trace Object - Hold Mouse and Draw Around Object")
         roi_win.geometry("1000x650")
+        roi_win.transient(self)
+        try:
+            roi_win.attributes("-topmost", True)
+        except Exception:
+            pass
+        roi_win.lift()
+        roi_win.focus_force()
+        self.after(250, lambda: roi_win.attributes("-topmost", False) if roi_win.winfo_exists() else None)
         
         # Convert image for display
         rgb = cv2.cvtColor(self.current_image, cv2.COLOR_BGR2RGB)
@@ -1041,7 +1070,14 @@ class DIPTool(ctk.CTk):
             roi_win.update_idletasks()
 
             try:
-                mask = segment_object_from_lasso(self.current_image, pending_lasso_mask[0], iterations=4, tighten_iterations=1)
+                edge_adjust = int(float(edge_slider.get())) if edge_slider is not None else 0
+                mask = segment_object_from_lasso(
+                    self.current_image,
+                    pending_lasso_mask[0],
+                    iterations=5,
+                    tighten_iterations=2,
+                    edge_adjust=edge_adjust,
+                )
             except Exception as exc:
                 apply_btn.configure(state="normal")
                 info.configure(text="Segmentation failed. Draw tighter contour and click Apply again.")
@@ -1055,14 +1091,14 @@ class DIPTool(ctk.CTk):
             used_rect_fallback = False
             lasso_area = int(cv2.countNonZero(pending_lasso_mask[0]))
             mask_area = int(cv2.countNonZero(mask))
-            if lasso_area > 0 and (mask_area / lasso_area) > 0.82:
+            if lasso_area > 0 and (mask_area / lasso_area) > 0.76:
                 try:
                     rect_mask = segment_object_from_rect(
                         self.current_image,
                         pending_bbox[0],
-                        iterations=6,
+                        iterations=7,
                         border_margin_ratio=0.1,
-                        tighten_iterations=1,
+                        tighten_iterations=2,
                     )
                     safe_lasso = cv2.erode(
                         pending_lasso_mask[0],
@@ -1096,6 +1132,7 @@ class DIPTool(ctk.CTk):
                     + (" | mode: object-in-box" if used_rect_fallback else " | mode: lasso-refine")
                 )
             )
+            self.refresh_display()
 
             roi_win.destroy()
             messagebox.showinfo("Success", "ROI applied. Filters will be applied only on the selected object.")
@@ -1135,6 +1172,27 @@ class DIPTool(ctk.CTk):
             width=140
         )
         apply_btn.pack(side="left", padx=6)
+
+        edge_frame = ctk.CTkFrame(roi_win, fg_color="transparent")
+        edge_frame.pack(pady=(0, 6))
+        ctk.CTkLabel(
+            edge_frame,
+            text="Edge Tighten",
+            font=ctk.CTkFont(family=self.ui["font"], size=10, weight="bold"),
+            text_color=self.ui["text"]
+        ).pack(side="left", padx=(0, 8))
+        edge_value = ctk.StringVar(value="0")
+        edge_label = ctk.CTkLabel(edge_frame, textvariable=edge_value, text_color=self.ui["muted"])
+        edge_label.pack(side="right", padx=(8, 0))
+        edge_slider = ctk.CTkSlider(
+            edge_frame,
+            from_=-4, to=4,
+            number_of_steps=8,
+            width=220,
+            command=lambda v: edge_value.set(str(int(float(v))))
+        )
+        edge_slider.set(0)
+        edge_slider.pack(side="right")
 
         ctk.CTkButton(
             controls,
